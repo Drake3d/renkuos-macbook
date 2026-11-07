@@ -1,0 +1,34 @@
+SubDir HAIKU_TOP src add-ons kernel drivers input apple_spi ;
+
+SubDirC++Flags -fno-rtti ;
+
+SubDirSysHdrs $(HAIKU_TOP) headers os drivers ;
+SubDirSysHdrs $(HAIKU_TOP) src add-ons kernel drivers input hid_shared ;
+UsePrivateHeaders [ FDirName kernel util ] input drivers device spi ;
+UsePrivateKernelHeaders ;
+
+SubDirHdrs [ FDirName $(HAIKU_TOP) src add-ons kernel bus_managers acpi acpica include ] ;
+SubDirHdrs [ FDirName $(HAIKU_TOP) src add-ons kernel bus_managers acpi acpica include platform ] ;
+
+SEARCH_SOURCE += [ FDirName $(HAIKU_TOP) src add-ons kernel drivers input hid_shared ] ;
+
+KernelAddon apple_spi :
+	AppleSPIDevice.cpp
+	AppleSPITouchpad.cpp
+	Driver.cpp
+	HIDDevice.cpp
+
+	DeviceList.cpp
+	HIDCollection.cpp
+	HIDParser.cpp
+	HIDReport.cpp
+	HIDReportItem.cpp
+	HIDWriter.cpp
+
+	ProtocolHandler.cpp
+
+	JoystickProtocolHandler.cpp
+	KeyboardProtocolHandler.cpp
+	MouseProtocolHandler.cpp
+	TabletProtocolHandler.cpp
+;
