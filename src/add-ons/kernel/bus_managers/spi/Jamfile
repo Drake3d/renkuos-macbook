@@ -1,0 +1,10 @@
+SubDir HAIKU_TOP src add-ons kernel bus_managers spi ;
+
+UsePrivateHeaders spi ;
+UsePrivateKernelHeaders ;
+
+KernelAddon spi :
+	SPIBus.cpp
+	SPIDevice.cpp
+	SPIModule.cpp
+	;
