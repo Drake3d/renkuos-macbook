@@ -3,6 +3,7 @@
 # be used.
 
 # Available Optional Packages:
+#	AppleSPIInput			- keyboard and trackpad of the 2015-2017 MacBook (Pro)
 #	BeOSCompatibility		- creates links within the system to support old apps
 #	Development				- more complete dev environment (including autotools)
 #	DevelopmentBase			- basic development environment (gcc, headers, libs,...)
@@ -146,6 +147,15 @@ if [ IsOptionalHaikuImagePackageAdded DevelopmentMin ]
 if [ IsOptionalHaikuImagePackageAdded Git ] {
 	AddHaikuImageSystemPackages git@!gcc2 git_x86@secondary_x86 perl@!gcc2 perl_x86@secondary_x86 ;
 	AddHaikuImageSourcePackages git@!gcc2 git_x86@secondary_x86 perl@!gcc2 perl_x86@secondary_x86 ;
+}
+
+
+# AppleSPIInput
+if [ IsOptionalHaikuImagePackageAdded AppleSPIInput ] {
+	if $(TARGET_ARCH) = x86 || $(TARGET_ARCH) = x86_64 {
+		AddPackageFilesToHaikuImage system packages : apple_spi_input.hpkg
+			: nameFromMetaInfo ;
+	}
 }
 
 

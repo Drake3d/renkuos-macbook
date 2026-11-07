@@ -1,0 +1,25 @@
+name			apple_spi_input
+version			%HAIKU_VERSION%
+architecture	%HAIKU_PACKAGING_ARCH%
+summary			"MacBook SPI keyboard and trackpad drivers"
+
+description		"Drivers for the internal keyboard and trackpad of the MacBook \
+(2015-2017) and MacBook Pro (2016-2017), which are connected over SPI: \
+the SPI bus manager, the Intel LPSS SPI controller driver and apple_spi."
+
+packager		"The Haiku build system"
+vendor			"RenkuOS"
+
+copyrights		{
+	"2026 RenkuOS Contributors"
+	"2008-2026 Haiku, Inc. et al"
+}
+licenses		"MIT"
+
+provides {
+	apple_spi_input = %HAIKU_VERSION%
+}
+
+requires {
+	haiku
+}
