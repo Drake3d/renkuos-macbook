@@ -131,6 +131,17 @@ arch_start_kernel(addr_t kernelEntry)
 	// Re-init and activate serial in a horrific post-EFI landscape. Clowns roam the land freely.
 	serial_init();
 	serial_enable();
+	
+	// On Apple at lest the 2017 Macbook Pro 14,1 you need to leave Apple's Page Table and
+	// enter Haiku's Page Table earlier before entering kernel or you fault Apples Page Table
+	// by writing SMP startup code to low memory which Apples Page tables don't allow once
+	// ExitBootServices runs and it hangs before it can boot the other cpus.
+	// arch_enter_kernel loads the tables this just does it earlier to prevent.
+	// the hang on Apple Hardware. Not sure if this fix would affect non Apple hardware
+	// and it may affect any hardware loaded above 4GB before moving to Haiku's Page Table,
+	// it may also affect Framebuffer if it writes above 4GB before the move.
+
+	asm volatile("movq %0, %%cr3" : : "r"(final_pml4) : "memory"); 
 
 	smp_boot_other_cpus(final_pml4, kernelEntry, (addr_t)&gKernelArgs);
 
