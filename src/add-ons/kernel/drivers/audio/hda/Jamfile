@@ -9,4 +9,5 @@ KernelAddon hda :
 	hda_multi_audio.cpp
 	hda_controller.cpp
 	hda_codec.cpp
+	hda_cs8409.cpp
 ;

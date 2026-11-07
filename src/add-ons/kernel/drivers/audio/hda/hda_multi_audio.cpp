@@ -11,6 +11,7 @@
 #include <driver_settings.h>
 
 #include "driver.h"
+#include "hda_cs8409.h"
 
 #include <kernel.h>
 
@@ -1006,9 +1007,15 @@ get_buffers(hda_audio_group* audioGroup, multi_buffer_list* data)
 
 	/* Copy the settings into the streams */
 
+	// Some codecs need the stream wider than what the user side fills.
+	uint32 playbackChannels = data->return_playback_channels;
+	uint32 codecChannels = hda_cs8409_playback_channels(audioGroup->codec);
+	if (codecChannels > playbackChannels)
+		playbackChannels = codecChannels;
+
 	if (audioGroup->playback_stream != NULL) {
 		audioGroup->playback_stream->num_buffers = data->return_playback_buffers;
-		audioGroup->playback_stream->num_channels = data->return_playback_channels;
+		audioGroup->playback_stream->num_channels = playbackChannels;
 		audioGroup->playback_stream->buffer_length
 			= data->return_playback_buffer_size;
 
@@ -1048,7 +1055,7 @@ get_buffers(hda_audio_group* audioGroup, multi_buffer_list* data)
 				descs[channelIndex].base = (char*)audioGroup->playback_stream->buffers[i]
 					+ playbackSampleSize * channelIndex;
 				descs[channelIndex].stride = playbackSampleSize
-					* data->return_playback_channels;
+					* playbackChannels;
 			}
 			if (!IS_USER_ADDRESS(data->playback_buffers[i])
 				|| user_memcpy(data->playback_buffers[i], descs, sizeof(descs))
@@ -1094,9 +1101,11 @@ buffer_exchange(hda_audio_group* audioGroup, multi_buffer_info* data)
 		return B_ERROR;
 
 	if (!audioGroup->playback_stream->running) {
+		hda_cs8409_playback_start(audioGroup);
 		hda_stream_start(audioGroup->codec->controller,
 			audioGroup->playback_stream);
 	}
+	hda_cs8409_playback_running(audioGroup);
 	if (audioGroup->record_stream && !audioGroup->record_stream->running) {
 		hda_stream_start(audioGroup->codec->controller,
 			audioGroup->record_stream);
@@ -1166,6 +1175,7 @@ buffer_force_stop(hda_audio_group* audioGroup)
 	if (audioGroup->playback_stream != NULL) {
 		hda_stream_stop(audioGroup->codec->controller,
 			audioGroup->playback_stream);
+		hda_cs8409_playback_stop(audioGroup);
 	}
 	if (audioGroup->record_stream != NULL) {
 		hda_stream_stop(audioGroup->codec->controller,

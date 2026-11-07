@@ -11,6 +11,7 @@
 
 #include "driver.h"
 #include "hda_codec_defs.h"
+#include "hda_cs8409.h"
 
 
 #undef TRACE
@@ -1382,6 +1383,12 @@ hda_audio_group_get_widgets(hda_audio_group* audioGroup, hda_stream* stream)
 			i++) {
 		hda_widget& widget = audioGroup->widgets[i];
 
+		if (stream->type == STREAM_PLAYBACK
+			&& !hda_cs8409_use_playback_widget(audioGroup->codec,
+				widget.node_id)) {
+			continue;
+		}
+
 		if ((widget.flags & flags) != 0) {
 			if (widget.type == WT_PIN_COMPLEX) {
 				stream->pin_widget = widget.node_id;
@@ -1463,6 +1470,13 @@ hda_audio_group_get_widgets(hda_audio_group* audioGroup, hda_stream* stream)
 
 	if (count == 0)
 		return B_ENTRY_NOT_FOUND;
+
+	if (stream->type == STREAM_PLAYBACK
+		&& hda_cs8409_is_apple(audioGroup->codec)) {
+		// The amplifiers are set up for 44.1 kHz, 24 bit only.
+		stream->sample_format &= B_FMT_24BIT;
+		stream->sample_rate &= B_SR_44100;
+	}
 
 	stream->num_io_widgets = count;
 	return B_OK;
@@ -1600,6 +1614,8 @@ hda_codec_new(hda_controller* controller, uint32 codecAddress)
 		(uint32)codec->subsystem_id,
 		response.major, response.minor, response.revision, response.stepping,
 		codec->quirks);
+
+	hda_cs8409_init(codec);
 
 	codec->unsol_response_thread = spawn_kernel_thread(
 		(status_t(*)(void*))hda_codec_switch_handler,
