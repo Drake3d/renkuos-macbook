@@ -1231,6 +1231,11 @@ hda_audio_group_switch_init(hda_audio_group* audioGroup)
 static void
 hda_audio_group_check_sense(hda_audio_group* audioGroup, bool disable)
 {
+	// That codec's jack is not sensed through its pin; it switches outputs
+	// itself.
+	if (hda_cs8409_is_apple(audioGroup->codec))
+		return;
+
 	for (uint32 i = 0; i < audioGroup->widget_count; i++) {
 		hda_widget& widget = audioGroup->widgets[i];
 

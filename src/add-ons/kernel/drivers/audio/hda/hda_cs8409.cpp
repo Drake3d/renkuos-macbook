@@ -11,8 +11,9 @@
 	TDM link to four speaker amplifiers, which only play once they have been
 	set up over an I2C bus that the CS8409 drives itself. This file does that
 	set-up when playback starts and powers the amplifiers down when it stops.
-	It covers the speakers only; the headphone codec (CS42L83) and the
-	microphones are not handled yet.
+	The headphone jack has its own codec, a CS42L83 on the same bus; while
+	playing, the jack is checked and the sound goes either to the speakers
+	or to the headphones. The microphones are not handled yet.
 
 	Sources, as noted at each step:
 	[M]	Linux patch_cs8409.c and patch_cs8409.h, by Cirrus Logic: the
@@ -21,8 +22,10 @@
 		converter sequences for this machine, which that project traced
 		from macOS.
 	[S]	Linux ssm3515.c: the SSM3515 amplifier register and bit names.
-	All three are GPL; only facts were taken from them, no code. The
-	SSM3515 datasheet itself has not been checked yet.
+	[L]	Linux include/sound/cs42l42.h and cs42l42.c: the CS42L42 register
+		names and timings; the CS42L83 shares its register map.
+	All four are GPL; only facts were taken from them, no code. The
+	SSM3515 and CS42L42 datasheets themselves have not been checked yet.
 */
 
 
@@ -124,10 +127,53 @@ static const uint32 kLevelLogs = 12;
 static uint32 sExchanges;
 static uint32 sLevelLogs;
 
+// The headphone jack: a CS42L83 codec on the same I2C bus, fed from the
+// CS8409's second serial port through converter 0x0a [D]. Its registers
+// are 16 bit, the page in the high byte, and are named here as in the
+// CS42L42 [L], which it shares its register map with.
+#define CS8409_NODE_HEADPHONES		0x0a	// converter to pin 0x2c
+#define CS8409_PIN_HEADPHONES		0x2c
+#define CS42L83_ADDRESS				0x90
+#define CS42L83_GPIO_RESET			0x02	// on the function group, active low
+#define CS42L83_PAGE				0x00	// page select, in every page
+#define CS42L83_DEVID_AB			0x1001
+#define CS42L83_REVID				0x1005
+#define CS42L83_PWR_CTL1			0x1101
+#define CS42L83_SRCPL_INT_STATUS	0x130b
+#define CS42L83_SRCPL_DAC_LOCKED	0x04
+#define CS42L83_TIPSENSE_CTL		0x1b73
+#define CS42L83_DET_STATUS1			0x1b77
+#define CS42L83_DET_TIP_SENSE		0x80	// a plug is in
+#define CS42L83_HP_CTL				0x2001
+#define CS42L83_HP_MUTE				0x0c	// both analog mutes
+#define CS42L83_MIXER_CHA_VOL		0x2301
+#define CS42L83_MIXER_CHB_VOL		0x2303
+
+// Headphone volume, as attenuation in dB of the CS42L83 mixer (0 is
+// 0 dB, 63 mutes) [L]. "apple_headphone_volume <dB>" in hda.settings
+// changes it.
+static const uint8 kDefaultHeadphoneAttenuation = 12;
+static uint8 sHeadphoneAttenuation = kDefaultHeadphoneAttenuation;
+
+// The output in use: speakers or headphones, never both. While playing,
+// the jack is checked this often and an output change is taken once two
+// checks in a row agree.
+enum output_type {
+	OUTPUT_NONE,
+	OUTPUT_SPEAKERS,
+	OUTPUT_HEADPHONES
+};
+static output_type sOutput = OUTPUT_NONE;
+static const uint32 kJackCheckEveryExchanges = 10;
+static uint32 sJackExchanges;
+static bool sLastJackReading;
+static bool sHeadphoneCodec;	// the CS42L83 answered at boot
+
 static const int kI2CPolls = 10;
 static const bigtime_t kI2CPollDelay = 2000;
 
 static mutex sLock = MUTEX_INITIALIZER("hda cs8409");
+static int32 sCodecPage = -1;
 
 
 bool
@@ -463,17 +509,6 @@ sync_converters(hda_codec* codec, bool start)
 }
 
 
-//!	Puts the second speaker pair's converter on channels 2 and 3.
-static void
-move_second_pair(hda_codec* codec)
-{
-	uint32 streamChannel = read_verb(codec, CS8409_NODE_SPEAKERS_B,
-		VID_GET_CONVERTER_STREAM_CHANNEL) & 0xf0;
-	send_verb(codec, CS8409_NODE_SPEAKERS_B, VID_SET_CONVERTER_STREAM_CHANNEL,
-		streamChannel | CS8409_SPEAKERS_B_CHANNEL);
-}
-
-
 /*!	Copies channels 0 and 1 of every playback buffer to channels 2 and 3, for
 	the second speaker pair. Called from the media server's thread while it
 	waits in buffer_exchange, so it does not write the buffers at the same
@@ -542,6 +577,336 @@ start_test_tone(hda_stream* stream)
 }
 
 
+//	#pragma mark - headphone codec (CS42L83)
+
+
+static status_t
+codec_select_page(hda_codec* codec, uint16 reg)
+{
+	int32 page = reg >> 8;
+	if (page == sCodecPage)
+		return B_OK;
+
+	status_t status = i2c_write(codec, CS42L83_ADDRESS, CS42L83_PAGE, page);
+	sCodecPage = status == B_OK ? page : -1;
+	return status;
+}
+
+
+static status_t
+codec_write(hda_codec* codec, uint16 reg, uint8 value)
+{
+	status_t status = codec_select_page(codec, reg);
+	if (status != B_OK)
+		return status;
+	return i2c_write(codec, CS42L83_ADDRESS, reg & 0xff, value);
+}
+
+
+static status_t
+codec_read(hda_codec* codec, uint16 reg, uint8* _value)
+{
+	status_t status = codec_select_page(codec, reg);
+	if (status != B_OK)
+		return status;
+	return i2c_read(codec, CS42L83_ADDRESS, reg & 0xff, _value);
+}
+
+
+static void
+codec_update(hda_codec* codec, uint16 reg, uint8 mask, uint8 value)
+{
+	uint8 old = 0;
+	if (codec_read(codec, reg, &old) == B_OK)
+		codec_write(codec, reg, (old & ~mask) | (value & mask));
+}
+
+
+/*!	Takes the CS42L83 out of reset and sets it up as [D] does at boot, with
+	its outputs off. Returns whether it answered.
+*/
+static bool
+headphone_codec_init(hda_codec* codec)
+{
+	uint32 group = codec->audio_groups[0]->widget.node_id;
+
+	// reset low, then high; it needs 3 ms after that [L]
+	send_verb(codec, group, VID_SET_GPIO_EN, 0x0f);
+	send_verb(codec, group, VID_SET_GPIO_DIR, CS42L83_GPIO_RESET);
+	send_verb(codec, group, VID_SET_GPIO_DATA, 0);
+	snooze(1000);
+	send_verb(codec, group, VID_SET_GPIO_DATA, CS42L83_GPIO_RESET);
+	snooze(5000);
+	sCodecPage = -1;
+
+	uint8 device = 0, revision = 0;
+	if (codec_read(codec, CS42L83_DEVID_AB, &device) != B_OK
+		|| codec_read(codec, CS42L83_REVID, &revision) != B_OK) {
+		ERROR("the headphone codec does not answer\n");
+		return false;
+	}
+	TRACE("headphone codec: device 0x%02x, revision 0x%02x\n", device,
+		revision);
+
+	codec_write(codec, 0x1103, 0x22);	// PWR_CTL3
+	codec_write(codec, 0x1129, 0x01);	// HS_CLAMP_DISABLE
+	codec_write(codec, 0x1320, 0x0f);	// TSRS_PLUG_INT_MASK: all masked
+	codec_write(codec, 0x131b, 0x03);	// CODEC_INT_MASK
+	codec_write(codec, 0x2302, 0x3f);	// MIXER_ADC_VOL: muted
+	codec_write(codec, 0x1f01, 0x00);	// DAC_CTL1
+	codec_write(codec, 0x1121, 0xa6);	// HS_SWITCH_CTL
+	for (uint16 reg = 0x1316; reg <= 0x131a; reg++)
+		codec_write(codec, reg, 0x00);	// interrupt masks
+	codec_write(codec, 0x131c, 0x1a);	// SRCPL_INT_MASK
+	codec_write(codec, 0x131e, 0x00);	// VPMON_INT_MASK
+	codec_write(codec, 0x131f, 0x00);	// PLL_LOCK_INT_MASK
+
+	// reading the status registers clears them
+	static const uint16 kStatus[] = {
+		0x1301, 0x1302, 0x1303, 0x1304, 0x1305, 0x130b, 0x130d, 0x130e,
+		0x130f, 0x1308
+	};
+	for (size_t i = 0; i < B_COUNT_OF(kStatus); i++) {
+		uint8 value;
+		codec_read(codec, kStatus[i], &value);
+	}
+
+	codec_write(codec, CS42L83_PWR_CTL1, 0xfe);
+		// the codec on, all its parts powered down
+	codec_write(codec, 0x1b75, 0x9f);	// MIC_DET_CTL1
+	codec_write(codec, CS42L83_TIPSENSE_CTL, 0xc0);
+		// tip sense on, not inverted
+	return true;
+}
+
+
+static bool
+headphones_present(hda_codec* codec)
+{
+	uint8 status = 0;
+	if (!sHeadphoneCodec
+		|| codec_read(codec, CS42L83_DET_STATUS1, &status) != B_OK) {
+		return false;
+	}
+	return (status & CS42L83_DET_TIP_SENSE) != 0;
+}
+
+
+//!	The CS8409's second serial port, to the CS42L83 [D].
+static void
+headphone_port_enable(hda_codec* codec)
+{
+	write_coef(codec, 0x15, 0xaaaa);
+	write_coef(codec, 0x14, 0x0100);
+	write_coef(codec, 0x29, 0x0800);
+	write_coef(codec, 0x2a, 0x0820);
+
+	uint16 config = read_coef(codec, CS8409_DEV_CFG1);
+	write_coef(codec, CS8409_DEV_CFG1, 0xb000);
+	write_coef(codec, 0x07, 0x10ff);
+	write_coef(codec, CS8409_DEV_CFG1, 0xb000);
+	write_coef(codec, CS8409_DEV_CFG1, config | 0x2000);
+
+	write_coef(codec, 0x06, 0x8000);
+	write_coef(codec, 0x08, 0x0040);
+	update_coef(codec, 0x82, 0xa800, 0xa800);
+	write_coef(codec, CS8409_DEV_CFG3, 0x0280);
+
+	// sample rate fields, for 44.1 kHz
+	update_coef(codec, 0x01, 0x0380, 0x0200);
+	update_coef(codec, 0x08, 0x0007, 0x0002);
+	update_coef(codec, 0x07, 0x01ff, 0x00ff);
+
+	update_coef(codec, 0x01, 0x0040, 0x0040);
+	write_coef(codec, 0x6c, 0x001f);
+	update_coef(codec, 0x71, 0x800f, 0x800f);
+	send_verb(codec, CS8409_NODE_VENDOR, CS8409_VID_TDM_COMMIT, 0xb6);
+	send_verb(codec, CS8409_PIN_HEADPHONES, VID_SET_PIN_WIDGET_CONTROL,
+		PIN_ENABLE_HEAD_PHONE | PIN_ENABLE_OUTPUT);
+}
+
+
+static void
+headphone_port_disable(hda_codec* codec)
+{
+	write_coef(codec, 0x29, 0x8800);
+	write_coef(codec, 0x2a, 0x8820);
+	update_coef(codec, 0x82, 0xa800, 0);
+	update_coef(codec, 0x01, 0x0040, 0);
+	write_coef(codec, 0x71, 0);
+	send_verb(codec, CS8409_NODE_VENDOR, CS8409_VID_TDM_COMMIT, 0);
+	send_verb(codec, CS8409_PIN_HEADPHONES, VID_SET_PIN_WIDGET_CONTROL, 0);
+}
+
+
+//!	The CS42L83 playing its serial port to the headphones, at 44.1 kHz [D].
+static void
+headphone_codec_on(hda_codec* codec)
+{
+	// internal clocks and PLL, fixed for 44.1 kHz
+	codec_write(codec, 0x1007, 0x10);	// FSYNC_P_LOWER area, as traced
+	codec_write(codec, 0x1009, 0x02);
+	codec_write(codec, 0x120c, 0x02);
+	codec_write(codec, 0x1502, 0xff);	// PLL_DIV_FRAC0
+	codec_write(codec, 0x1503, 0x9c);	// PLL_DIV_FRAC1
+	codec_write(codec, 0x1504, 0x70);	// PLL_DIV_FRAC2
+	codec_write(codec, 0x1505, 0x2e);	// PLL_DIV_INT
+	codec_write(codec, 0x151b, 0x03);	// PLL_CTL4
+	codec_write(codec, 0x150a, 0x5d);	// PLL_CAL_RATIO
+	codec_write(codec, 0x1508, 0x10);	// PLL_CTL3
+	codec_write(codec, 0x1501, 0x01);	// PLL_CTL1: start
+	codec_write(codec, 0x1205, 0xff);
+	codec_write(codec, 0x1206, 0x00);
+	codec_write(codec, 0x1201, 0x00);
+	codec_write(codec, 0x1208, 0x00);
+
+	codec_write(codec, 0x1207, 0x20);
+	codec_write(codec, 0x1501, 0x01);
+	codec_write(codec, 0x1107, 0x01);
+
+	// serial port, 44.1 kHz
+	codec_write(codec, 0x2505, 0x05);
+	codec_write(codec, 0x2502, 0x05);
+	codec_write(codec, 0x2503, 0x8a);	// SP_RX_FS
+	codec_write(codec, 0x2506, 0xca);	// SP_TX_FS
+	codec_write(codec, 0x1208, 0x02);
+	codec_write(codec, 0x2601, 0x4a);	// SRC_SDIN_FS
+	codec_write(codec, 0x120a, 0x00);
+	codec_update(codec, 0x1209, 0x01, 0x01);	// FS_RATE_EN
+
+	// output path, muted for now
+	codec_write(codec, 0x1f06, 0x02);
+	codec_write(codec, CS42L83_HP_CTL, 0x0d);
+	codec_write(codec, 0x2a04, 0x00);
+	codec_write(codec, 0x2a07, 0x20);
+	codec_write(codec, CS42L83_MIXER_CHA_VOL, sHeadphoneAttenuation);
+	codec_write(codec, CS42L83_MIXER_CHB_VOL, sHeadphoneAttenuation);
+	codec_write(codec, 0x2a02, 0x02);	// 24 bit samples
+	codec_write(codec, 0x2a05, 0x02);
+	codec_write(codec, 0x100b, 0x00);
+	codec_write(codec, 0x2a01, 0x0c);	// serial port channels 1 and 2 on
+
+	// power up, waiting for the DAC's sample rate converter to lock
+	codec_update(codec, CS42L83_PWR_CTL1, 0x61, 0);
+	bool locked = false;
+	for (int i = 0; i < 20 && !locked; i++) {
+		uint8 status = 0;
+		if (codec_read(codec, CS42L83_SRCPL_INT_STATUS, &status) == B_OK)
+			locked = (status & CS42L83_SRCPL_DAC_LOCKED) != 0;
+		if (!locked)
+			snooze(2000);
+	}
+	if (!locked)
+		ERROR("headphone codec: DAC not locked, going on\n");
+	codec_update(codec, CS42L83_PWR_CTL1, 0x08, 0);
+
+	codec_write(codec, 0x107e, 0x99);
+	codec_write(codec, 0x1b08, 0x30);
+	codec_write(codec, 0x2102, 0x00);
+	codec_write(codec, 0x107e, 0x00);
+	codec_update(codec, CS42L83_HP_CTL, CS42L83_HP_MUTE, 0);
+}
+
+
+static void
+headphone_codec_off(hda_codec* codec)
+{
+	codec_update(codec, CS42L83_HP_CTL, CS42L83_HP_MUTE, CS42L83_HP_MUTE);
+	codec_write(codec, 0x107e, 0x99);
+	codec_write(codec, 0x1b08, 0x10);
+	codec_write(codec, 0x2102, 0x20);
+	codec_write(codec, 0x107e, 0x00);
+	codec_update(codec, CS42L83_PWR_CTL1, 0x08, 0x08);
+	codec_update(codec, CS42L83_PWR_CTL1, 0x60, 0x60);
+	codec_write(codec, 0x2a01, 0x00);
+	codec_write(codec, 0x1107, 0x00);
+	codec_write(codec, 0x1501, 0x00);	// PLL off
+}
+
+
+//	#pragma mark - outputs
+
+
+static void
+speakers_on(hda_codec* codec, hda_stream* stream)
+{
+	send_verb(codec, CS8409_NODE_SPEAKERS_A, VID_SET_CONVERTER_STREAM_CHANNEL,
+		stream->id << 4);
+	send_verb(codec, CS8409_NODE_SPEAKERS_B, VID_SET_CONVERTER_STREAM_CHANNEL,
+		(stream->id << 4) | CS8409_SPEAKERS_B_CHANNEL);
+
+	tdm_enable(codec);
+	for (size_t i = 0; i < B_COUNT_OF(kAmplifiers); i++)
+		amplifier_setup(codec, kAmplifiers[i].address, kAmplifiers[i].slot);
+	sync_converters(codec, true);
+	if (sTestTone)
+		start_test_tone(stream);
+}
+
+
+static void
+speakers_off(hda_codec* codec)
+{
+	sync_converters(codec, false);
+	for (size_t i = 0; i < B_COUNT_OF(kAmplifiers); i++)
+		amplifier_power_down(codec, kAmplifiers[i].address);
+	tdm_disable(codec);
+	send_verb(codec, CS8409_NODE_SPEAKERS_A, VID_SET_CONVERTER_STREAM_CHANNEL,
+		0);
+	send_verb(codec, CS8409_NODE_SPEAKERS_B, VID_SET_CONVERTER_STREAM_CHANNEL,
+		0);
+}
+
+
+static void
+headphones_on(hda_codec* codec, hda_stream* stream)
+{
+	// the same stream as the speakers would take, channels 0 and 1
+	uint32 format = read_verb(codec, CS8409_NODE_SPEAKERS_A,
+		VID_GET_CONVERTER_FORMAT) & 0xffff;
+	send_verb(codec, CS8409_NODE_HEADPHONES, VID_SET_CONVERTER_FORMAT, format);
+	send_verb(codec, CS8409_NODE_HEADPHONES, VID_SET_CONVERTER_STREAM_CHANNEL,
+		stream->id << 4);
+
+	headphone_port_enable(codec);
+	headphone_codec_on(codec);
+}
+
+
+static void
+headphones_off(hda_codec* codec)
+{
+	headphone_codec_off(codec);
+	headphone_port_disable(codec);
+	send_verb(codec, CS8409_NODE_HEADPHONES, VID_SET_CONVERTER_STREAM_CHANNEL,
+		0);
+}
+
+
+//!	Switches the sound to the given output, or off. Called with sLock held.
+static void
+select_output(hda_codec* codec, hda_stream* stream, output_type output)
+{
+	if (output == sOutput)
+		return;
+
+	if (sOutput == OUTPUT_SPEAKERS)
+		speakers_off(codec);
+	else if (sOutput == OUTPUT_HEADPHONES)
+		headphones_off(codec);
+
+	send_verb(codec, CS8409_NODE_VENDOR, VID_SET_PROCESSING_STATE, 1);
+	if (output == OUTPUT_SPEAKERS) {
+		TRACE("sound to the speakers\n");
+		speakers_on(codec, stream);
+	} else if (output == OUTPUT_HEADPHONES) {
+		TRACE("sound to the headphones\n");
+		headphones_on(codec, stream);
+	}
+	sOutput = output;
+}
+
+
 //	#pragma mark - public
 
 
@@ -564,9 +929,14 @@ hda_cs8409_init(hda_codec* codec)
 			false, true);
 		sDebug = get_driver_boolean_parameter(settings, "apple_debug", false,
 			true);
+		value = get_driver_parameter(settings, "apple_headphone_volume", NULL,
+			NULL);
+		if (value != NULL)
+			sHeadphoneAttenuation = min_c(strtoul(value, NULL, 0), 63);
 		unload_driver_settings(settings);
 	}
-	TRACE("amplifier volume 0x%02x%s%s\n", sAmplifierVolume,
+	TRACE("amplifier volume 0x%02x, headphones -%u dB%s%s\n",
+		sAmplifierVolume, sHeadphoneAttenuation,
 		sTestTone ? ", test tone on" : "", sDebug ? ", debug logging" : "");
 
 	// audio function group on, vendor processing on
@@ -591,6 +961,12 @@ hda_cs8409_init(hda_codec* codec)
 	}
 	TRACE("%d of %d amplifiers answered\n", answered,
 		(int)B_COUNT_OF(kAmplifiers));
+
+	sHeadphoneCodec = headphone_codec_init(codec);
+	if (sHeadphoneCodec) {
+		TRACE("headphones %s\n",
+			headphones_present(codec) ? "plugged in" : "not plugged in");
+	}
 }
 
 
@@ -623,16 +999,16 @@ hda_cs8409_playback_start(hda_audio_group* audioGroup)
 		return;
 
 	MutexLocker locker(sLock);
-	TRACE("playback start: speakers on\n");
+	TRACE("playback start\n");
 
-	send_verb(codec, CS8409_NODE_VENDOR, VID_SET_PROCESSING_STATE, 1);
-	tdm_enable(codec);
-	for (size_t i = 0; i < B_COUNT_OF(kAmplifiers); i++)
-		amplifier_setup(codec, kAmplifiers[i].address, kAmplifiers[i].slot);
-	sync_converters(codec, true);
-	move_second_pair(codec);
-	if (sTestTone)
-		start_test_tone(audioGroup->playback_stream);
+	// Setting the stream up again puts the converters back on their
+	// defaults without a stop, so set the output up from scratch.
+	select_output(codec, audioGroup->playback_stream, OUTPUT_NONE);
+
+	sLastJackReading = headphones_present(codec);
+	sJackExchanges = 0;
+	select_output(codec, audioGroup->playback_stream,
+		sLastJackReading ? OUTPUT_HEADPHONES : OUTPUT_SPEAKERS);
 	sExchanges = 0;
 }
 
@@ -683,8 +1059,21 @@ hda_cs8409_playback_running(hda_audio_group* audioGroup)
 	if (!hda_cs8409_is_apple(codec))
 		return;
 
-	if (!sTestTone)
+	if (sOutput == OUTPUT_SPEAKERS && !sTestTone)
 		copy_to_second_pair(audioGroup->playback_stream);
+
+	// Follow the jack, once two checks in a row agree.
+	if (sHeadphoneCodec && ++sJackExchanges >= kJackCheckEveryExchanges) {
+		sJackExchanges = 0;
+		MutexLocker locker(sLock);
+		bool present = headphones_present(codec);
+		output_type wanted = present ? OUTPUT_HEADPHONES : OUTPUT_SPEAKERS;
+		if (present == sLastJackReading && wanted != sOutput) {
+			TRACE("headphones %s\n", present ? "plugged in" : "unplugged");
+			select_output(codec, audioGroup->playback_stream, wanted);
+		}
+		sLastJackReading = present;
+	}
 
 	if (!sDebug)
 		return;
@@ -712,10 +1101,6 @@ hda_cs8409_playback_stop(hda_audio_group* audioGroup)
 		return;
 
 	MutexLocker locker(sLock);
-	TRACE("playback stop: speakers off\n");
-
-	sync_converters(codec, false);
-	for (size_t i = 0; i < B_COUNT_OF(kAmplifiers); i++)
-		amplifier_power_down(codec, kAmplifiers[i].address);
-	tdm_disable(codec);
+	TRACE("playback stop\n");
+	select_output(codec, audioGroup->playback_stream, OUTPUT_NONE);
 }
