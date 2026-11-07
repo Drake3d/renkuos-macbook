@@ -8,10 +8,11 @@
 //!	Driver for the SPI keyboard and trackpad of the MacBook (2015-2017) and
 //	MacBook Pro (2016-2017), ACPI hardware ID APP000D.
 //
-//	The keyboard is published as input/keyboard/spi/N and handled by the
-//	keyboard code shared with the USB and I2C HID drivers. The trackpad is
-//	published as input/mouse/spi/N and speaks the touchpad protocol, so that
-//	input_server's touchpad settings and gestures apply to it.
+//	The keyboard, and its media keys as a second keyboard, are published as
+//	input/keyboard/spi/N and handled by the keyboard code shared with the
+//	USB and I2C HID drivers. The trackpad is published as input/mouse/spi/N
+//	and speaks the touchpad protocol, so that input_server's touchpad
+//	settings and gestures apply to it.
 
 
 #include <ACPI.h>
@@ -274,11 +275,14 @@ apple_spi_uninit_driver(void* driverCookie)
 	MutexLocker locker(sDriverLock);
 
 	// Only happens when the device goes away: the node keeps itself loaded.
-	for (uint32 i = 0;; i++) {
-		ProtocolHandler* handler = device->Keyboard()->ProtocolHandlerAt(i);
-		if (handler == NULL)
-			break;
-		gDeviceList->RemoveDevice(NULL, handler);
+	HIDDevice* keyboards[] = { device->Keyboard(), device->MediaKeys() };
+	for (size_t k = 0; k < B_COUNT_OF(keyboards); k++) {
+		for (uint32 i = 0;; i++) {
+			ProtocolHandler* handler = keyboards[k]->ProtocolHandlerAt(i);
+			if (handler == NULL)
+				break;
+			gDeviceList->RemoveDevice(NULL, handler);
+		}
 	}
 	gDeviceList->RemoveDevice(NULL, device->Touchpad());
 
@@ -322,17 +326,21 @@ apple_spi_register_child_devices(void* driverCookie)
 	if (device->IsPublished())
 		return B_OK;
 
-	for (uint32 i = 0;; i++) {
-		ProtocolHandler* handler = device->Keyboard()->ProtocolHandlerAt(i);
-		if (handler == NULL)
-			break;
+	HIDDevice* keyboards[] = { device->Keyboard(), device->MediaKeys() };
+	for (size_t k = 0; k < B_COUNT_OF(keyboards); k++) {
+		for (uint32 i = 0;; i++) {
+			ProtocolHandler* handler = keyboards[k]->ProtocolHandlerAt(i);
+			if (handler == NULL)
+				break;
 
-		char* path;
-		status_t status = publish(device, handler->BasePath(), handler, &path);
-		if (path != NULL)
-			handler->SetPublishPath(path);
-		if (status != B_OK)
-			ERROR("publishing %s failed: %s\n", path, strerror(status));
+			char* path;
+			status_t status = publish(device, handler->BasePath(), handler,
+				&path);
+			if (path != NULL)
+				handler->SetPublishPath(path);
+			if (status != B_OK)
+				ERROR("publishing %s failed: %s\n", path, strerror(status));
+		}
 	}
 
 	char* path;

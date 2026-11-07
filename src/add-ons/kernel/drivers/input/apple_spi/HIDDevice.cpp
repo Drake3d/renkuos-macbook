@@ -55,11 +55,31 @@ static const uint8 kBootKeyboardDescriptor[] = {
 	0xc0				// End Collection
 };
 
+// The media keys: one consumer usage at a time. The shared keyboard handler
+// passes these on as key codes 0x000c0000 + usage, as it does for the media
+// keys of USB keyboards.
+static const uint8 kMediaKeysDescriptor[] = {
+	0x05, 0x0c,			// Usage Page (Consumer)
+	0x09, 0x01,			// Usage (Consumer Control)
+	0xa1, 0x01,			// Collection (Application)
+	0x15, 0x00,			//   Logical Minimum (0)
+	0x26, 0xff, 0x00,	//   Logical Maximum (255)
+	0x19, 0x00,			//   Usage Minimum (0)
+	0x2a, 0xff, 0x00,	//   Usage Maximum (255)
+	0x75, 0x08,			//   Report Size (8)
+	0x95, 0x01,			//   Report Count (1)
+	0x81, 0x00,			//   Input (Data, Array)
+	0xc0				// End Collection
+};
 
-HIDDevice::HIDDevice(AppleSPIDevice* transport)
+
+HIDDevice::HIDDevice(AppleSPIDevice* transport, apple_spi_hid_kind kind)
 	:
 	fStatus(B_NO_INIT),
 	fTransport(transport),
+	fKind(kind),
+	fReportSize(kind == APPLE_SPI_HID_KEYBOARD
+		? APPLE_SPI_BOOT_REPORT_SIZE : APPLE_SPI_MEDIA_REPORT_SIZE),
 	fOpenCount(0),
 	fRemoved(false),
 	fParser(this),
@@ -71,8 +91,13 @@ HIDDevice::HIDDevice(AppleSPIDevice* transport)
 {
 	mutex_init(&fQueueLock, "apple_spi keyboard queue");
 
-	fStatus = fParser.ParseReportDescriptor(kBootKeyboardDescriptor,
-		sizeof(kBootKeyboardDescriptor));
+	if (kind == APPLE_SPI_HID_KEYBOARD) {
+		fStatus = fParser.ParseReportDescriptor(kBootKeyboardDescriptor,
+			sizeof(kBootKeyboardDescriptor));
+	} else {
+		fStatus = fParser.ParseReportDescriptor(kMediaKeysDescriptor,
+			sizeof(kMediaKeysDescriptor));
+	}
 	if (fStatus != B_OK) {
 		ERROR("parsing the keyboard descriptor failed: %s\n",
 			strerror(fStatus));
@@ -148,18 +173,19 @@ HIDDevice::MaybeScheduleTransfer(HIDReport* report)
 		return B_OK;
 	}
 
-	memcpy(fTransferBuffer, fQueue[fQueueHead], sizeof(fTransferBuffer));
+	memcpy(fTransferBuffer, fQueue[fQueueHead], fReportSize);
 	fQueueHead = (fQueueHead + 1) % APPLE_SPI_REPORT_QUEUE;
 	fQueueCount--;
 	fTransferPending = false;
 	locker.Unlock();
 
-	fParser.SetReport(B_OK, fTransferBuffer, sizeof(fTransferBuffer));
+	fParser.SetReport(B_OK, fTransferBuffer, fReportSize);
 	return B_OK;
 }
 
 
-//!	Takes a boot report from the transport.
+//!	Takes a report from the transport: a boot report, or for the media
+//	keys a single usage byte.
 void
 HIDDevice::QueueReport(const uint8* report)
 {
@@ -172,10 +198,10 @@ HIDDevice::QueueReport(const uint8* report)
 		// out just now, the report is lost; the next one carries the full
 		// key state again.
 		fTransferPending = false;
-		memcpy(fTransferBuffer, report, sizeof(fTransferBuffer));
+		memcpy(fTransferBuffer, report, fReportSize);
 		locker.Unlock();
 
-		fParser.SetReport(B_OK, fTransferBuffer, sizeof(fTransferBuffer));
+		fParser.SetReport(B_OK, fTransferBuffer, fReportSize);
 		return;
 	}
 
@@ -186,7 +212,7 @@ HIDDevice::QueueReport(const uint8* report)
 	}
 
 	uint32 tail = (fQueueHead + fQueueCount) % APPLE_SPI_REPORT_QUEUE;
-	memcpy(fQueue[tail], report, APPLE_SPI_BOOT_REPORT_SIZE);
+	memcpy(fQueue[tail], report, fReportSize);
 	fQueueCount++;
 }
 
@@ -197,7 +223,9 @@ HIDDevice::SendReport(HIDReport* report)
 {
 	if (fRemoved)
 		return ENODEV;
-	if (report->Type() != HID_REPORT_TYPE_OUTPUT || report->ReportSize() < 1)
+	if (fKind != APPLE_SPI_HID_KEYBOARD
+		|| report->Type() != HID_REPORT_TYPE_OUTPUT
+		|| report->ReportSize() < 1)
 		return B_OK;
 
 	// bit 0 num lock, bit 1 caps lock, as laid out in the descriptor

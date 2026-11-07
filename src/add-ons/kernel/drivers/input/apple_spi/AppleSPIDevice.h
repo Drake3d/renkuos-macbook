@@ -36,6 +36,7 @@ public:
 
 			device_node*		Node() const { return fNode; }
 			HIDDevice*			Keyboard() const { return fKeyboard; }
+			HIDDevice*			MediaKeys() const { return fMediaKeys; }
 			AppleSPITouchpad*	Touchpad() const { return fTouchpad; }
 
 			bool				IsPublished() const { return fPublished; }
@@ -99,6 +100,7 @@ private:
 			acpi_handle			fHandle;
 
 			HIDDevice*			fKeyboard;
+			HIDDevice*			fMediaKeys;
 			AppleSPITouchpad*	fTouchpad;
 			bool				fPublished;
 			bool				fRemoved;
@@ -132,6 +134,7 @@ private:
 			// keyboard backlight, set from the keyboard by the thread
 			int32				fBacklight;		// step, 0 is off
 			uint8				fBacklightKeys;	// F5/F6 held down
+			uint8				fMediaKey;		// consumer usage held down
 			bigtime_t			fBacklightTimeout;	// 0: never idle
 			bigtime_t			fLastActivity;
 			bool				fBacklightIdle;	// off until the next input

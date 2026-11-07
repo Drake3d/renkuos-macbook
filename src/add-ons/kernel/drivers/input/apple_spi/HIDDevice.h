@@ -17,17 +17,26 @@ class ProtocolHandler;
 
 
 #define APPLE_SPI_BOOT_REPORT_SIZE	8
+#define APPLE_SPI_MEDIA_REPORT_SIZE	1
 #define APPLE_SPI_REPORT_QUEUE		32
 
 
+enum apple_spi_hid_kind {
+	APPLE_SPI_HID_KEYBOARD,
+	APPLE_SPI_HID_MEDIA_KEYS
+};
+
+
 //!	The keyboard, presented to the shared HID code (the same code the USB
-//	and I2C HID drivers use) as a HID boot keyboard. The Apple reports are
-//	turned into boot reports by AppleSPIDevice and queued here; the caps
-//	lock LED report goes back to AppleSPIDevice as a command.
+//	and I2C HID drivers use) as a HID boot keyboard, and its media keys as
+//	a second, consumer control device. The Apple reports are turned into
+//	these reports by AppleSPIDevice and queued here; the caps lock LED
+//	report goes back to AppleSPIDevice as a command.
 //	The class name and methods are the interface the shared code expects.
 class HIDDevice {
 public:
-								HIDDevice(AppleSPIDevice* transport);
+								HIDDevice(AppleSPIDevice* transport,
+									apple_spi_hid_kind kind);
 								~HIDDevice();
 
 			status_t			InitCheck() const { return fStatus; }
@@ -52,6 +61,8 @@ public:
 private:
 			status_t			fStatus;
 			AppleSPIDevice*		fTransport;
+			apple_spi_hid_kind	fKind;
+			size_t				fReportSize;
 
 			int32				fOpenCount;
 			bool				fRemoved;

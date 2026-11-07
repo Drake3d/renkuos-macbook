@@ -13,6 +13,7 @@
 
 #include <driver_settings.h>
 #include <KernelExport.h>
+#include <usb/USB_hid.h>
 
 extern "C" {
 #	include "acpi.h"
@@ -56,6 +57,17 @@ static const struct {
 #define HID_KEY_F5				0x3e
 #define HID_KEY_F6				0x3f
 
+// F10 to F12 carry the mute and volume symbols. Without fn they are sent as
+// those media keys; with fn they are F10 to F12.
+static const struct {
+	uint8	key;
+	uint8	usage;
+} kMediaKeys[] = {
+	{ 0x43, B_HID_UID_CON_MUTE },				// F10
+	{ 0x44, B_HID_UID_CON_VOLUME_DECREMENT },	// F11
+	{ 0x45, B_HID_UID_CON_VOLUME_INCREMENT },	// F12
+};
+
 // F5 and F6 carry the keyboard backlight symbols. Without fn they dim and
 // brighten it in this many steps; with fn they are F5 and F6.
 static const int32 kBacklightSteps = 16;
@@ -77,6 +89,7 @@ AppleSPIDevice::AppleSPIDevice(device_node* node, spi_device_interface* spi,
 	fACPI(acpi),
 	fHandle(handle),
 	fKeyboard(NULL),
+	fMediaKeys(NULL),
 	fTouchpad(NULL),
 	fPublished(false),
 	fRemoved(false),
@@ -97,6 +110,7 @@ AppleSPIDevice::AppleSPIDevice(device_node* node, spi_device_interface* spi,
 	fCapsLock(0),
 	fBacklight(kDefaultBacklight),
 	fBacklightKeys(0),
+	fMediaKey(0),
 	fBacklightTimeout(kDefaultBacklightTimeout),
 	fLastActivity(0),
 	fBacklightIdle(false)
@@ -111,6 +125,7 @@ AppleSPIDevice::~AppleSPIDevice()
 {
 	_Stop();
 	delete fKeyboard;
+	delete fMediaKeys;
 	delete fTouchpad;
 }
 
@@ -121,12 +136,15 @@ AppleSPIDevice::_Init()
 	if (_UsbInterfaceActive())
 		return B_NOT_SUPPORTED;
 
-	fKeyboard = new(std::nothrow) HIDDevice(this);
+	fKeyboard = new(std::nothrow) HIDDevice(this, APPLE_SPI_HID_KEYBOARD);
+	fMediaKeys = new(std::nothrow) HIDDevice(this, APPLE_SPI_HID_MEDIA_KEYS);
 	fTouchpad = new(std::nothrow) AppleSPITouchpad();
-	if (fKeyboard == NULL || fTouchpad == NULL)
+	if (fKeyboard == NULL || fMediaKeys == NULL || fTouchpad == NULL)
 		return B_NO_MEMORY;
 	if (fKeyboard->InitCheck() != B_OK)
 		return fKeyboard->InitCheck();
+	if (fMediaKeys->InitCheck() != B_OK)
+		return fMediaKeys->InitCheck();
 	if (fTouchpad->InitCheck() != B_OK)
 		return fTouchpad->InitCheck();
 
@@ -401,6 +419,8 @@ AppleSPIDevice::Removed()
 	fRemoved = true;
 	if (fKeyboard != NULL)
 		fKeyboard->Removed();
+	if (fMediaKeys != NULL)
+		fMediaKeys->Removed();
 	if (fTouchpad != NULL)
 		fTouchpad->Removed();
 	_Stop();
@@ -762,6 +782,7 @@ AppleSPIDevice::_HandleKeyboard(const uint8* payload, size_t length)
 	report[0] = payload[APPLE_SPI_KBD_MODIFIERS];
 
 	uint8 backlightKeys = 0;
+	uint8 mediaKey = 0;
 	for (int i = 0; i < APPLE_SPI_KBD_KEY_COUNT; i++) {
 		uint8 key = keys[i];
 		if (key == HID_KEY_ERROR_ROLLOVER) {
@@ -772,6 +793,19 @@ AppleSPIDevice::_HandleKeyboard(const uint8* payload, size_t length)
 			backlightKeys |= key == HID_KEY_F5
 				? kBacklightDownKey : kBacklightUpKey;
 			continue;
+		}
+		if (!fn) {
+			bool isMediaKey = false;
+			for (size_t j = 0; j < B_COUNT_OF(kMediaKeys); j++) {
+				if (kMediaKeys[j].key == key) {
+					// One at a time; the last one pressed wins.
+					mediaKey = kMediaKeys[j].usage;
+					isMediaKey = true;
+					break;
+				}
+			}
+			if (isMediaKey)
+				continue;
 		}
 		if (fn) {
 			for (size_t j = 0; j < B_COUNT_OF(kFnKeys); j++) {
@@ -793,6 +827,13 @@ AppleSPIDevice::_HandleKeyboard(const uint8* payload, size_t length)
 		_SetBacklight(fBacklight + 1);
 
 	fKeyboard->QueueReport(report);
+
+	// The shared handler repeats a held key on its own, so only changes
+	// need to go out.
+	if (mediaKey != fMediaKey) {
+		fMediaKey = mediaKey;
+		fMediaKeys->QueueReport(&mediaKey);
+	}
 }
 
 
