@@ -58,8 +58,17 @@
 #define APPLE_SPI_CMD_MT_INIT		0x0252
 #define APPLE_SPI_CMD_CAPS_LOCK		0x0151
 
+#define APPLE_SPI_CMD_BACKLIGHT		0xb051
+
 #define APPLE_SPI_MT_INIT_MAGIC		0x0102
 #define APPLE_SPI_CAPS_LOCK_ON		0x02
+
+// keyboard backlight payload: le16 magic, le16 level, le16 on/off
+#define APPLE_SPI_BACKLIGHT_MAGIC	0x01b0
+#define APPLE_SPI_BACKLIGHT_ON		0x01f4
+#define APPLE_SPI_BACKLIGHT_OFF		0x0001
+#define APPLE_SPI_BACKLIGHT_MIN		32		// lowest level that lights up
+#define APPLE_SPI_BACKLIGHT_MAX		255
 
 // The reply to a write, read right after it.
 static const uint8 kAppleSPIStatusOK[APPLE_SPI_STATUS_SIZE]

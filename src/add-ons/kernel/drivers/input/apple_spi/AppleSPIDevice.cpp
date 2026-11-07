@@ -53,6 +53,18 @@ static const struct {
 };
 
 #define HID_KEY_ERROR_ROLLOVER	0x01
+#define HID_KEY_F5				0x3e
+#define HID_KEY_F6				0x3f
+
+// F5 and F6 carry the keyboard backlight symbols. Without fn they dim and
+// brighten it in this many steps; with fn they are F5 and F6.
+static const int32 kBacklightSteps = 16;
+static const int32 kDefaultBacklight = 8;
+// The backlight goes off after this long without a key press or a touch,
+// and comes back with the next one.
+static const bigtime_t kDefaultBacklightTimeout = 30000000;
+static const uint8 kBacklightDownKey = 0x01;
+static const uint8 kBacklightUpKey = 0x02;
 
 
 AppleSPIDevice::AppleSPIDevice(device_node* node, spi_device_interface* spi,
@@ -82,7 +94,12 @@ AppleSPIDevice::AppleSPIDevice(device_node* node, spi_device_interface* spi,
 	fBadPackets(0),
 	fLoggedMessages(0),
 	fPendingCommands(0),
-	fCapsLock(0)
+	fCapsLock(0),
+	fBacklight(kDefaultBacklight),
+	fBacklightKeys(0),
+	fBacklightTimeout(kDefaultBacklightTimeout),
+	fLastActivity(0),
+	fBacklightIdle(false)
 {
 	fStatus = _Init();
 	if (fStatus != B_OK)
@@ -142,9 +159,30 @@ AppleSPIDevice::_Init()
 	if (fThread < 0)
 		return fThread;
 
+	// Driver settings: "keyboard_backlight <0-16>" is the backlight level at
+	// start, "keyboard_backlight_timeout <seconds>" how long it stays on
+	// without input; 0 keeps it on.
+	void* settings = load_driver_settings(DRIVER_NAME);
+	if (settings != NULL) {
+		const char* value = get_driver_parameter(settings,
+			"keyboard_backlight", NULL, NULL);
+		if (value != NULL) {
+			fBacklight = max_c(0, min_c(strtol(value, NULL, 10),
+				kBacklightSteps));
+		}
+		value = get_driver_parameter(settings, "keyboard_backlight_timeout",
+			NULL, NULL);
+		if (value != NULL)
+			fBacklightTimeout = max_c(0, strtol(value, NULL, 10)) * 1000000LL;
+		unload_driver_settings(settings);
+	}
+	fLastActivity = system_time();
+	int32 commands = kCommandTouchpadInfo | kCommandMultitouch
+		| kCommandBacklight;
+
 	// Ask what trackpad this is, then put it into multitouch mode. Wake the
 	// thread so that this goes out now, not with the first key press.
-	atomic_or(&fPendingCommands, kCommandTouchpadInfo | kCommandMultitouch);
+	atomic_or(&fPendingCommands, commands);
 	resume_thread(fThread);
 	release_sem(fEvent);
 
@@ -427,6 +465,13 @@ AppleSPIDevice::_Run()
 	while (!fStopping) {
 		bigtime_t timeout = fGPE < 0 ? kPollInterval
 			: fWriteInFlight ? kWriteTimeout / 4 : B_INFINITE_TIMEOUT;
+		if (!fBacklightIdle && fBacklight > 0 && fBacklightTimeout > 0) {
+			// wake up to turn the backlight off
+			bigtime_t left = max_c(0,
+				fLastActivity + fBacklightTimeout - system_time());
+			if (timeout == B_INFINITE_TIMEOUT || left < timeout)
+				timeout = left;
+		}
 		if (timeout == B_INFINITE_TIMEOUT)
 			acquire_sem(fEvent);
 		else
@@ -447,6 +492,8 @@ AppleSPIDevice::_Run()
 			ERROR("no reply to command, going on\n");
 			fWriteInFlight = false;
 		}
+
+		_CheckBacklightIdle();
 
 		if (!fWriteInFlight)
 			_SendNextCommand();
@@ -549,10 +596,19 @@ AppleSPIDevice::_SendNextCommand()
 	if (pending == 0)
 		return false;
 
-	int32 command = (pending & kCommandTouchpadInfo) != 0
-		? kCommandTouchpadInfo
-		: (pending & kCommandMultitouch) != 0
-			? kCommandMultitouch : kCommandCapsLock;
+	static const int32 kOrder[] = {
+		kCommandTouchpadInfo, kCommandMultitouch, kCommandCapsLock,
+		kCommandBacklight
+	};
+	int32 command = 0;
+	for (size_t i = 0; i < B_COUNT_OF(kOrder); i++) {
+		if ((pending & kOrder[i]) != 0) {
+			command = kOrder[i];
+			break;
+		}
+	}
+	if (command == 0)
+		return false;
 	atomic_and(&fPendingCommands, ~command);
 
 	// A command whose status reads wrong is sent again, a few times.
@@ -569,13 +625,22 @@ AppleSPIDevice::_SendNextCommand()
 			apple_spi_put_le16(payload, APPLE_SPI_MT_INIT_MAGIC);
 			status = _WriteMessage(APPLE_SPI_DEVICE_TOUCHPAD,
 				APPLE_SPI_CMD_MT_INIT, 0x0002, payload, sizeof(payload));
-		} else {
+		} else if (command == kCommandCapsLock) {
 			uint8 payload[2] = {
 				0x01, (uint8)(atomic_get(&fCapsLock) != 0
 					? APPLE_SPI_CAPS_LOCK_ON : 0)
 			};
 			status = _WriteMessage(APPLE_SPI_DEVICE_KEYBOARD,
 				APPLE_SPI_CMD_CAPS_LOCK, 0, payload, sizeof(payload));
+		} else {
+			uint16 level = _BacklightLevel();
+			uint8 payload[6];
+			apple_spi_put_le16(payload, APPLE_SPI_BACKLIGHT_MAGIC);
+			apple_spi_put_le16(payload + 2, level);
+			apple_spi_put_le16(payload + 4, level != 0
+				? APPLE_SPI_BACKLIGHT_ON : APPLE_SPI_BACKLIGHT_OFF);
+			status = _WriteMessage(APPLE_SPI_DEVICE_KEYBOARD,
+				APPLE_SPI_CMD_BACKLIGHT, 0, payload, sizeof(payload));
 		}
 		if (status != B_BAD_DATA)
 			break;
@@ -662,6 +727,11 @@ AppleSPIDevice::_HandleMessage(uint8 flags, uint8 device,
 			" bytes\n", type, device, payloadLength);
 	}
 
+	if (device == APPLE_SPI_DEVICE_KEYBOARD
+		|| device == APPLE_SPI_DEVICE_TOUCHPAD) {
+		_NoteActivity();
+	}
+
 	switch (device) {
 		case APPLE_SPI_DEVICE_KEYBOARD:
 			_HandleKeyboard(payload, payloadLength);
@@ -691,11 +761,17 @@ AppleSPIDevice::_HandleKeyboard(const uint8* payload, size_t length)
 	// The modifier bits are laid out as in HID.
 	report[0] = payload[APPLE_SPI_KBD_MODIFIERS];
 
+	uint8 backlightKeys = 0;
 	for (int i = 0; i < APPLE_SPI_KBD_KEY_COUNT; i++) {
 		uint8 key = keys[i];
 		if (key == HID_KEY_ERROR_ROLLOVER) {
 			// Too many keys at once; the state is unknown.
 			return;
+		}
+		if (!fn && (key == HID_KEY_F5 || key == HID_KEY_F6)) {
+			backlightKeys |= key == HID_KEY_F5
+				? kBacklightDownKey : kBacklightUpKey;
+			continue;
 		}
 		if (fn) {
 			for (size_t j = 0; j < B_COUNT_OF(kFnKeys); j++) {
@@ -708,5 +784,67 @@ AppleSPIDevice::_HandleKeyboard(const uint8* payload, size_t length)
 		report[2 + i] = key;
 	}
 
+	// One step per press; holding the key does not repeat.
+	uint8 pressed = backlightKeys & ~fBacklightKeys;
+	fBacklightKeys = backlightKeys;
+	if ((pressed & kBacklightDownKey) != 0)
+		_SetBacklight(fBacklight - 1);
+	if ((pressed & kBacklightUpKey) != 0)
+		_SetBacklight(fBacklight + 1);
+
 	fKeyboard->QueueReport(report);
+}
+
+
+//!	Called by the thread; the command goes out from its loop.
+void
+AppleSPIDevice::_SetBacklight(int32 step)
+{
+	step = max_c(0, min_c(step, kBacklightSteps));
+	if (step == fBacklight)
+		return;
+
+	fBacklight = step;
+	atomic_or(&fPendingCommands, kCommandBacklight);
+}
+
+
+//!	The level to send: step 1 is the lowest that lights up, the last step
+//	the brightest.
+uint16
+AppleSPIDevice::_BacklightLevel() const
+{
+	if (fBacklightIdle || fBacklight <= 0)
+		return 0;
+
+	return APPLE_SPI_BACKLIGHT_MIN
+		+ (APPLE_SPI_BACKLIGHT_MAX - APPLE_SPI_BACKLIGHT_MIN)
+			* (fBacklight - 1) / (kBacklightSteps - 1);
+}
+
+
+//!	A key press or a touch: turns the backlight back on if it went idle.
+void
+AppleSPIDevice::_NoteActivity()
+{
+	fLastActivity = system_time();
+	if (!fBacklightIdle)
+		return;
+
+	fBacklightIdle = false;
+	if (fBacklight > 0)
+		atomic_or(&fPendingCommands, kCommandBacklight);
+}
+
+
+void
+AppleSPIDevice::_CheckBacklightIdle()
+{
+	if (fBacklightIdle || fBacklight <= 0 || fBacklightTimeout <= 0
+		|| system_time() - fLastActivity < fBacklightTimeout) {
+		return;
+	}
+
+	fBacklightIdle = true;
+	atomic_or(&fPendingCommands, kCommandBacklight);
 }

@@ -78,12 +78,17 @@ private:
 									const uint8* message, size_t length);
 			void				_HandleKeyboard(const uint8* payload,
 									size_t length);
+			void				_SetBacklight(int32 step);
+			uint16				_BacklightLevel() const;
+			void				_NoteActivity();
+			void				_CheckBacklightIdle();
 
 private:
 	enum {
 		kCommandTouchpadInfo	= 0x01,
 		kCommandMultitouch		= 0x02,
 		kCommandCapsLock		= 0x04,
+		kCommandBacklight		= 0x08,
 	};
 
 			status_t			fStatus;
@@ -123,6 +128,13 @@ private:
 			// commands asked for by other threads
 			int32				fPendingCommands;
 			int32				fCapsLock;
+
+			// keyboard backlight, set from the keyboard by the thread
+			int32				fBacklight;		// step, 0 is off
+			uint8				fBacklightKeys;	// F5/F6 held down
+			bigtime_t			fBacklightTimeout;	// 0: never idle
+			bigtime_t			fLastActivity;
+			bool				fBacklightIdle;	// off until the next input
 };
 
 
