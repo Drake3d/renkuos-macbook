@@ -1,6 +1,7 @@
 # Keyboard and trackpad of the MacBook (2015-2017) and MacBook Pro
 # (2016-2017), as a package of its own: the SPI bus manager, the Intel
-# LPSS SPI controller driver and the apple_spi input driver. It needs no
+# LPSS SPI controller driver, the apple_spi input driver, and the
+# input_server filter that makes the volume keys work. It needs no
 # change to the kernel, so it can be installed on a stock system.
 
 local appleSPIInputPackage = apple_spi_input.hpkg ;
@@ -9,5 +10,6 @@ HaikuPackage $(appleSPIInputPackage) ;
 AddFilesToPackage add-ons kernel bus_managers : spi ;
 AddFilesToPackage add-ons kernel drivers spi : pch_spi ;
 AddNewDriversToPackage input : apple_spi ;
+AddFilesToPackage add-ons input_server filters : media_keys ;
 
 BuildHaikuPackage $(appleSPIInputPackage) : apple_spi_input ;

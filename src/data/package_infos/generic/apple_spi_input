@@ -5,7 +5,8 @@ summary			"MacBook SPI keyboard and trackpad drivers"
 
 description		"Drivers for the internal keyboard and trackpad of the MacBook \
 (2015-2017) and MacBook Pro (2016-2017), which are connected over SPI: \
-the SPI bus manager, the Intel LPSS SPI controller driver and apple_spi."
+the SPI bus manager, the Intel LPSS SPI controller driver and apple_spi. \
+Also makes the mute and volume keys change the system volume."
 
 packager		"The Haiku build system"
 vendor			"RenkuOS"

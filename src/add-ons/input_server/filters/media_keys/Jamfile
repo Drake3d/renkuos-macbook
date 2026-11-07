@@ -1,0 +1,10 @@
+SubDir HAIKU_TOP src add-ons input_server filters media_keys ;
+
+SubDirHdrs [ FDirName $(HAIKU_TOP) src bin desklink ] ;
+SEARCH_SOURCE += [ FDirName $(HAIKU_TOP) src bin desklink ] ;
+
+Addon media_keys
+	: MediaKeysInputFilter.cpp
+	  MixerControl.cpp
+	: be libmedia.so input_server [ TargetLibsupc++ ]
+	;
