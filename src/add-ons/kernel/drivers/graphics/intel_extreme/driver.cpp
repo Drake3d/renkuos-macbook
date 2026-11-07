@@ -165,8 +165,8 @@ const struct supported_device {
 	{0x5917, INTEL_MODEL_KBYM, "Kabylake Mobile GT2"},
 	{0x591b, INTEL_MODEL_KBYM, "Kabylake Halo GT2"},
 	{0x591d, INTEL_MODEL_KBY,  "Kabylake WKS GT2"},
-	{0x5926, INTEL_MODEL_KBY,  "Kabylake ULT GT3"},
-	{0x5927, INTEL_MODEL_KBY,  "Kabylake ULT GT3"},
+	{0x5926, INTEL_MODEL_KBYM, "Kabylake ULT GT3"},
+	{0x5927, INTEL_MODEL_KBYM, "Kabylake ULT GT3"},
 
 	{0x3185, INTEL_MODEL_KBYM, "GeminiLake GT1"},	// Same device id for desktop and mobile.
 	{0x3184, INTEL_MODEL_KBYM, "GeminiLake GT1.5"},	// Same device id for desktop and mobile.

@@ -737,6 +737,11 @@ intel_get_brightness(float* brightness)
 			duty >>= 1;
 		}
 	}
+	if (period == 0) {
+		// The backlight PWM is not set up; it cannot be controlled here.
+		return B_ERROR;
+	}
+
 	*brightness = (float)duty / period;
 
 	return B_OK;
