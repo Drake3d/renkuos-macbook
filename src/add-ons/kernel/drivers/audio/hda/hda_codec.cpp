@@ -1393,6 +1393,11 @@ hda_audio_group_get_widgets(hda_audio_group* audioGroup, hda_stream* stream)
 				widget.node_id)) {
 			continue;
 		}
+		if (stream->type == STREAM_RECORD
+			&& !hda_cs8409_use_record_widget(audioGroup->codec,
+				widget.node_id)) {
+			continue;
+		}
 
 		if ((widget.flags & flags) != 0) {
 			if (widget.type == WT_PIN_COMPLEX) {
@@ -1476,9 +1481,9 @@ hda_audio_group_get_widgets(hda_audio_group* audioGroup, hda_stream* stream)
 	if (count == 0)
 		return B_ENTRY_NOT_FOUND;
 
-	if (stream->type == STREAM_PLAYBACK
-		&& hda_cs8409_is_apple(audioGroup->codec)) {
-		// The amplifiers are set up for 44.1 kHz, 24 bit only.
+	if (hda_cs8409_is_apple(audioGroup->codec)) {
+		// The amplifiers are set up for 44.1 kHz, 24 bit only, and the
+		// bridge's clocks with them.
 		stream->sample_format &= B_FMT_24BIT;
 		stream->sample_rate &= B_SR_44100;
 	}

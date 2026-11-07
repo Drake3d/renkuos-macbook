@@ -16,9 +16,10 @@
 bool		hda_cs8409_is_apple(hda_codec* codec);
 void		hda_cs8409_init(hda_codec* codec);
 
-// Which widgets the playback stream may use; the others are unused bridge
-// outputs and are left alone.
+// Which widgets the playback and recording streams may use; the others are
+// unused bridge outputs and inputs and are left alone.
 bool		hda_cs8409_use_playback_widget(hda_codec* codec, uint32 nodeID);
+bool		hda_cs8409_use_record_widget(hda_codec* codec, uint32 nodeID);
 // The playback stream runs with this many channels whatever the user side
 // asks for; 0 for no restriction.
 uint32		hda_cs8409_playback_channels(hda_codec* codec);

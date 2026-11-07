@@ -13,7 +13,9 @@
 	set-up when playback starts and powers the amplifiers down when it stops.
 	The headphone jack has its own codec, a CS42L83 on the same bus; while
 	playing, the jack is checked and the sound goes either to the speakers
-	or to the headphones. The microphones are not handled yet.
+	or to the headphones. The internal microphones, a digital microphone
+	pair on the CS8409 itself, record through converter 0x22; the headset
+	microphone is not handled yet.
 
 	Sources, as noted at each step:
 	[M]	Linux patch_cs8409.c and patch_cs8409.h, by Cirrus Logic: the
@@ -126,6 +128,23 @@ static const uint32 kLevelEveryExchanges = 500;
 static const uint32 kLevelLogs = 12;
 static uint32 sExchanges;
 static uint32 sLevelLogs;
+
+// The internal microphones: a stereo digital microphone on the CS8409's
+// DMIC1 input, pin 0x44, recorded by converter 0x22 [M][D]. The CS8409
+// needs the DMIC1 mode in coefficient 0x09 [M] and the DMIC1 clock enable
+// in coefficient 0x82 [M][D].
+#define CS8409_NODE_MIC				0x22
+#define CS8409_PIN_MIC				0x44
+#define CS8409_DMIC_CFG				0x09
+#define CS8409_DMIC_CFG_DMIC1_MO	0x0020
+#define CS8409_PAD_CFG				0x82
+#define CS8409_PAD_CFG_DMIC1_SCL	0x0001
+
+// The microphones are quiet, as in macOS [D]. Pin 0x44 can boost them by
+// 10 or 20 dB; "apple_mic_boost <dB>" in hda.settings changes it. The
+// recording gain of converter 0x22 is in the media preferences' mixer.
+static const uint8 kDefaultMicBoost = 20;
+static uint8 sMicBoost = kDefaultMicBoost;
 
 // The headphone jack: a CS42L83 codec on the same I2C bus, fed from the
 // CS8409's second serial port through converter 0x0a [D]. Its registers
@@ -368,6 +387,69 @@ vendor_init(hda_codec* codec)
 	write_coef(codec, CS8409_DEV_CFG3, CS8409_DEV_CFG3_I2C_MODE);
 	write_coef(codec, CS8409_I2C_CONTROL, CS8409_I2C_CONTROL_100KHZ);
 	write_coef(codec, CS8409_DEV_CFG1, 0x9000);
+}
+
+
+//!	Sets the bridge up for the internal microphones; done once at boot.
+static void
+mic_init(hda_codec* codec)
+{
+	TRACE("microphone: DMIC config 0x%04x, pad config 0x%04x\n",
+		read_coef(codec, CS8409_DMIC_CFG), read_coef(codec, CS8409_PAD_CFG));
+
+	update_coef(codec, CS8409_DMIC_CFG, CS8409_DMIC_CFG_DMIC1_MO,
+		CS8409_DMIC_CFG_DMIC1_MO);
+	update_coef(codec, CS8409_PAD_CFG, CS8409_PAD_CFG_DMIC1_SCL,
+		CS8409_PAD_CFG_DMIC1_SCL);
+	send_verb(codec, CS8409_PIN_MIC, VID_SET_PIN_WIDGET_CONTROL,
+		PIN_ENABLE_INPUT);
+}
+
+
+/*!	Gets the microphones ready to record; done every time the streams
+	start. Converter 0x22 can be powered down on its own and is not powered
+	up by the generic code. Its input amplifier is unmuted, keeping the gain
+	the mixer set. Setting the recording stream up puts the boost of pin
+	0x44 back on 0 dB, so it is set again here.
+*/
+static void
+mic_start(hda_codec* codec)
+{
+	send_verb(codec, CS8409_NODE_MIC, VID_SET_POWER_STATE, 0);
+	send_verb(codec, CS8409_PIN_MIC, VID_SET_POWER_STATE, 0);
+
+	const uint32 kChannels[2][2] = {
+		{ AMP_GET_LEFT_CHANNEL, AMP_SET_LEFT_CHANNEL },
+		{ AMP_GET_RIGHT_CHANNEL, AMP_SET_RIGHT_CHANNEL }
+	};
+	for (int i = 0; i < 2; i++) {
+		uint32 gain = read_verb(codec, CS8409_NODE_MIC,
+			VID_GET_AMPLIFIER_GAIN_MUTE | AMP_GET_INPUT | kChannels[i][0]
+				| AMP_GET_INPUT_INDEX(0)) & 0x7f;
+		send_verb(codec, CS8409_NODE_MIC, VID_SET_AMPLIFIER_GAIN_MUTE,
+			AMP_SET_INPUT | kChannels[i][1] | AMP_SET_INPUT_INDEX(0) | gain);
+	}
+
+	send_verb(codec, CS8409_PIN_MIC, VID_SET_AMPLIFIER_GAIN_MUTE,
+		AMP_SET_INPUT | AMP_SET_LEFT_CHANNEL | AMP_SET_RIGHT_CHANNEL
+			| AMP_SET_INPUT_INDEX(0) | (sMicBoost / 10));
+
+	TRACE("microphone: converter power 0x%02" B_PRIx32 ", gain 0x%02" B_PRIx32
+		"/0x%02" B_PRIx32 ", format 0x%04" B_PRIx32 ", stream/channel 0x%02"
+		B_PRIx32 "; pin control 0x%02" B_PRIx32 ", boost 0x%02" B_PRIx32
+		"; DMIC config 0x%04x, pad config 0x%04x\n",
+		read_verb(codec, CS8409_NODE_MIC, VID_GET_POWER_STATE) & 0xff,
+		read_verb(codec, CS8409_NODE_MIC, VID_GET_AMPLIFIER_GAIN_MUTE
+			| AMP_GET_INPUT | AMP_GET_LEFT_CHANNEL) & 0xff,
+		read_verb(codec, CS8409_NODE_MIC, VID_GET_AMPLIFIER_GAIN_MUTE
+			| AMP_GET_INPUT | AMP_GET_RIGHT_CHANNEL) & 0xff,
+		read_verb(codec, CS8409_NODE_MIC, VID_GET_CONVERTER_FORMAT) & 0xffff,
+		read_verb(codec, CS8409_NODE_MIC, VID_GET_CONVERTER_STREAM_CHANNEL)
+			& 0xff,
+		read_verb(codec, CS8409_PIN_MIC, VID_GET_PIN_WIDGET_CONTROL) & 0xff,
+		read_verb(codec, CS8409_PIN_MIC, VID_GET_AMPLIFIER_GAIN_MUTE
+			| AMP_GET_INPUT | AMP_GET_LEFT_CHANNEL) & 0xff,
+		read_coef(codec, CS8409_DMIC_CFG), read_coef(codec, CS8409_PAD_CFG));
 }
 
 
@@ -933,10 +1015,13 @@ hda_cs8409_init(hda_codec* codec)
 			NULL);
 		if (value != NULL)
 			sHeadphoneAttenuation = min_c(strtoul(value, NULL, 0), 63);
+		value = get_driver_parameter(settings, "apple_mic_boost", NULL, NULL);
+		if (value != NULL)
+			sMicBoost = min_c(strtoul(value, NULL, 0), 20) / 10 * 10;
 		unload_driver_settings(settings);
 	}
-	TRACE("amplifier volume 0x%02x, headphones -%u dB%s%s\n",
-		sAmplifierVolume, sHeadphoneAttenuation,
+	TRACE("amplifier volume 0x%02x, headphones -%u dB, microphone +%u dB"
+		"%s%s\n", sAmplifierVolume, sHeadphoneAttenuation, sMicBoost,
 		sTestTone ? ", test tone on" : "", sDebug ? ", debug logging" : "");
 
 	// audio function group on, vendor processing on
@@ -944,6 +1029,7 @@ hda_cs8409_init(hda_codec* codec)
 		VID_SET_POWER_STATE, 0);
 	send_verb(codec, CS8409_NODE_VENDOR, VID_SET_PROCESSING_STATE, 1);
 	vendor_init(codec);
+	mic_init(codec);
 
 	// See which amplifiers answer, then keep them off until playback.
 	int answered = 0;
@@ -981,6 +1067,18 @@ hda_cs8409_use_playback_widget(hda_codec* codec, uint32 nodeID)
 }
 
 
+bool
+hda_cs8409_use_record_widget(hda_codec* codec, uint32 nodeID)
+{
+	if (!hda_cs8409_is_apple(codec))
+		return true;
+
+	// Every recording converter of a stream gets the same channels, so
+	// only the internal microphones' one may be in it.
+	return nodeID == CS8409_NODE_MIC || nodeID == CS8409_PIN_MIC;
+}
+
+
 uint32
 hda_cs8409_playback_channels(hda_codec* codec)
 {
@@ -1010,6 +1108,10 @@ hda_cs8409_playback_start(hda_audio_group* audioGroup)
 	select_output(codec, audioGroup->playback_stream,
 		sLastJackReading ? OUTPUT_HEADPHONES : OUTPUT_SPEAKERS);
 	sExchanges = 0;
+
+	// The recording stream starts together with the playback one.
+	if (audioGroup->record_stream != NULL)
+		mic_start(codec);
 }
 
 
