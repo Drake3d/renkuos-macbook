@@ -1,0 +1,14 @@
+SubDir HAIKU_TOP src add-ons kernel busses spi pch ;
+
+SubDirC++Flags -fno-rtti ;
+
+UsePrivateHeaders spi ;
+UsePrivateKernelHeaders ;
+
+SubDirHdrs [ FDirName $(SUBDIR) $(DOTDOT) $(DOTDOT) $(DOTDOT) bus_managers acpi acpica include ] ;
+SubDirHdrs [ FDirName $(SUBDIR) $(DOTDOT) $(DOTDOT) $(DOTDOT) bus_managers acpi acpica include platform ] ;
+
+KernelAddon pch_spi :
+	pch_spi.cpp
+	pch_spi_pci.cpp
+;

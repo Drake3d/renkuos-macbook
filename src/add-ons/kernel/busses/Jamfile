@@ -7,5 +7,6 @@ SubInclude HAIKU_TOP src add-ons kernel busses mmc ;
 SubInclude HAIKU_TOP src add-ons kernel busses pci ;
 SubInclude HAIKU_TOP src add-ons kernel busses random ;
 SubInclude HAIKU_TOP src add-ons kernel busses scsi ;
+SubInclude HAIKU_TOP src add-ons kernel busses spi ;
 SubInclude HAIKU_TOP src add-ons kernel busses usb ;
 SubInclude HAIKU_TOP src add-ons kernel busses virtio ;
