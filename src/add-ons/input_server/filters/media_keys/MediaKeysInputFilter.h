@@ -17,8 +17,9 @@ class BLooper;
 
 
 //!	Turns the mute and volume keys into changes of the system volume, the
-//	one the Deskbar volume control shows, and the display brightness keys
-//	into changes of the screen brightness.
+//	one the Deskbar volume control shows, the display brightness keys into
+//	changes of the screen brightness, and the track keys into commands for
+//	MediaPlayer.
 class MediaKeysInputFilter : public BInputServerFilter {
 public:
 								MediaKeysInputFilter();
@@ -29,7 +30,7 @@ public:
 
 private:
 			BLooper*			fLooper;
-			bool				fMuteHeld;
+			int32				fHeldKey;		// the last non-repeating key down
 };
 
 
