@@ -17,7 +17,8 @@ class BLooper;
 
 
 //!	Turns the mute and volume keys into changes of the system volume, the
-//	one the Deskbar volume control shows.
+//	one the Deskbar volume control shows, and the display brightness keys
+//	into changes of the screen brightness.
 class MediaKeysInputFilter : public BInputServerFilter {
 public:
 								MediaKeysInputFilter();
@@ -27,7 +28,7 @@ public:
 	virtual	filter_result		Filter(BMessage* message, BList* _list);
 
 private:
-			BLooper*			fVolumeLooper;
+			BLooper*			fLooper;
 			bool				fMuteHeld;
 };
 

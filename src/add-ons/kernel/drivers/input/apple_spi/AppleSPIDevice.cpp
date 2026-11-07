@@ -57,12 +57,15 @@ static const struct {
 #define HID_KEY_F5				0x3e
 #define HID_KEY_F6				0x3f
 
-// F10 to F12 carry the mute and volume symbols. Without fn they are sent as
-// those media keys; with fn they are F10 to F12.
+// F1 and F2 carry the screen brightness symbols, F10 to F12 the mute and
+// volume ones. Without fn they are sent as those media keys; with fn they
+// are the F keys.
 static const struct {
 	uint8	key;
 	uint8	usage;
 } kMediaKeys[] = {
+	{ 0x3a, B_HID_UID_CON_DISPLAY_BRIGHTNESS_DECREMENT },	// F1
+	{ 0x3b, B_HID_UID_CON_DISPLAY_BRIGHTNESS_INCREMENT },	// F2
 	{ 0x43, B_HID_UID_CON_MUTE },				// F10
 	{ 0x44, B_HID_UID_CON_VOLUME_DECREMENT },	// F11
 	{ 0x45, B_HID_UID_CON_VOLUME_INCREMENT },	// F12
