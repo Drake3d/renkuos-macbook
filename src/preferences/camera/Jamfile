@@ -1,0 +1,10 @@
+SubDir HAIKU_TOP src preferences camera ;
+
+SubDirHdrs [ FDirName $(HAIKU_TOP) src add-ons kernel drivers video facetimehd ] ;
+
+Application Camera :
+	Camera.cpp
+	CameraWindow.cpp
+	: be [ TargetLibsupc++ ]
+	: Camera.rdef
+	;

@@ -1,0 +1,21 @@
+/*
+ * Copyright 2026, RenkuOS Contributors.
+ * Distributed under the terms of the MIT License.
+ * SPDX-License-Identifier: MIT
+ */
+
+resource app_signature "application/x-vnd.RenkuOS-Camera";
+
+resource app_version {
+	major  = 1,
+	middle = 0,
+	minor  = 0,
+
+	variety = B_APPV_DEVELOPMENT,
+	internal = 0,
+
+	short_info = "Camera",
+	long_info  = "Camera, picture settings for the FaceTime HD camera"
+};
+
+resource app_flags B_SINGLE_LAUNCH;
