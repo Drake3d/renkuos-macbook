@@ -8,6 +8,7 @@
 #	Development				- more complete dev environment (including autotools)
 #	DevelopmentBase			- basic development environment (gcc, headers, libs,...)
 #	DevelopmentMin			- development headers, libs, tools, from sources only
+#	FaceTimeHD				- FaceTime HD camera of the 2015-2017 MacBook Pro
 #	Git						- the distributed version control system
 #	WebPositive				- native, WebKit-based web browser
 #	Welcome					- introductory documentation to Haiku
@@ -154,6 +155,15 @@ if [ IsOptionalHaikuImagePackageAdded Git ] {
 if [ IsOptionalHaikuImagePackageAdded AppleSPIInput ] {
 	if $(TARGET_ARCH) = x86 || $(TARGET_ARCH) = x86_64 {
 		AddPackageFilesToHaikuImage system packages : apple_spi_input.hpkg
+			: nameFromMetaInfo ;
+	}
+}
+
+
+# FaceTimeHD
+if [ IsOptionalHaikuImagePackageAdded FaceTimeHD ] {
+	if $(TARGET_ARCH) = x86 || $(TARGET_ARCH) = x86_64 {
+		AddPackageFilesToHaikuImage system packages : facetimehd.hpkg
 			: nameFromMetaInfo ;
 	}
 }

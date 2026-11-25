@@ -1,0 +1,16 @@
+# FaceTime HD camera of the MacBook Pro (2015-2017), as a package of its
+# own: the driver, its media add-on, the Camera preferences and a capture
+# test tool. It needs no change to the kernel, so it can be installed on a
+# stock system. Apple's camera firmware is not part of it.
+
+local faceTimeHDPackage = facetimehd.hpkg ;
+HaikuPackage $(faceTimeHDPackage) ;
+
+AddDriversToPackage video : facetimehd ;
+AddFilesToPackage bin : facetimehd_capture ;
+AddFilesToPackage add-ons media : facetimehd.media_addon ;
+AddFilesToPackage preferences : Camera ;
+AddSymlinkToPackage data deskbar menu Preferences
+	: ../../../../preferences/Camera : Camera ;
+
+BuildHaikuPackage $(faceTimeHDPackage) : facetimehd ;

@@ -1,0 +1,25 @@
+name			facetimehd
+version			%HAIKU_VERSION%
+architecture	%HAIKU_PACKAGING_ARCH%
+summary			"MacBook Pro FaceTime HD camera driver"
+
+description		"Driver for the FaceTime HD camera (Broadcom 14e4:1570) of the \
+MacBook Pro (2015-2017), with a media add-on for camera apps and the \
+Camera preferences. Apple's camera firmware and calibration files are not \
+included."
+
+packager		"The Haiku build system"
+vendor			"RenkuOS"
+
+copyrights		{
+	"2026 RenkuOS Contributors"
+}
+licenses		"MIT"
+
+provides {
+	facetimehd = %HAIKU_VERSION%
+}
+
+requires {
+	haiku
+}

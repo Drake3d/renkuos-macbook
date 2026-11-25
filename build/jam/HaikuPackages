@@ -2,6 +2,7 @@
 # subdirectory.
 local packages = [ FFilterByBuildFeatures
 	AppleSPIInput@x86,x86_64
+	FaceTimeHD@x86,x86_64
 	HaikuDevel
 	HaikuDataTranslators
 	HaikuExtras
