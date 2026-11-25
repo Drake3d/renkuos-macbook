@@ -86,6 +86,19 @@ public:
 
 			void				SetSubpixelAntialiasing(bool subpix);
 			bool				SubpixelAntialiasing() const;
+			void				SetCompositedDesktop(bool composited);
+			bool				CompositedDesktop() const;
+			void				SetCompositedShadows(bool shadows);
+			bool				CompositedShadows() const;
+			void				SetCompositedRoundedCorners(bool rounded);
+			bool				CompositedRoundedCorners() const;
+			void				SetCompositedDragTransparency(
+									bool transparent);
+			bool				CompositedDragTransparency() const;
+			void				SetCompositedWobblyWindows(bool wobbly);
+			bool				CompositedWobblyWindows() const;
+			void				SetCompositedWobbliness(uint8 wobbliness);
+			uint8				CompositedWobbliness() const;
 			void				SetHinting(uint8 hinting);
 			uint8				Hinting() const;
 			void				SetSubpixelAverageWeight(uint8 averageWeight);
@@ -119,6 +132,12 @@ private:
 			int32				fWorkspacesColumns;
 			int32				fWorkspacesRows;
 			BMessage			fWorkspaceMessages[kMaxWorkspaces];
+			bool				fCompositedDesktop;
+			bool				fCompositedShadows;
+			bool				fCompositedRoundedCorners;
+			bool				fCompositedDragTransparency;
+			bool				fCompositedWobblyWindows;
+			uint8				fCompositedWobbliness;
 			BString				fControlLook;
 
 			server_read_only_memory& fShared;

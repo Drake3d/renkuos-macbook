@@ -135,6 +135,12 @@ _athp_free_buf(struct ath10k *ar, struct athp_buf_ring *br,
 	if (bf->m != NULL) {
 		athp_unmap_buf(ar, br, bf);
 		m_freem(bf->m);
+		/*
+		 * The buffer goes back on the inactive list, and
+		 * athp_free_list() frees whatever mbuf each buffer still
+		 * points to at teardown: don't leave it pointing at this one.
+		 */
+		bf->m = NULL;
 	}
 }
 
@@ -187,6 +193,8 @@ athp_alloc_list(struct ath10k *ar, struct athp_buf_ring *br, int count, int btyp
 		ath10k_err(ar, "%s: malloc failed!\n", __func__);
 		return (-1);
 	}
+	/* athp_free_list() frees this many at teardown */
+	br->br_count = count;
 
 	/* Setup initial state for each entry */
 	for (i = 0; i < count; i++) {

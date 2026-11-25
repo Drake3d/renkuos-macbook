@@ -26,6 +26,7 @@
 #include "displayport.h"
 #include "encoder.h"
 #include "gpu.h"
+#include "hdmi.h"
 #include "pll.h"
 #include "utility.h"
 
@@ -193,6 +194,11 @@ radeon_set_display_mode(display_mode* mode)
 	if (gDisplay[crtcID]->attached == false)
 		return B_ERROR;
 
+	// app_server can restore a saved mode that is no longer in the mode
+	// list, so check it against the same limits.
+	if (!is_mode_supported(mode))
+		return B_BAD_VALUE;
+
 	// Copy this display mode into the "current mode" for the display
 	memcpy(&gDisplay[crtcID]->currentMode, mode, sizeof(display_mode));
 
@@ -206,6 +212,10 @@ radeon_set_display_mode(display_mode* mode)
 	}
 
 	// *** crtc and encoder prep
+	// From DCE 6 on, the pipe may be power gated; it has to be on to be set
+	// up, as in Linux's atombios_crtc_prepare().
+	if (gInfo->shared_info->dceMajor >= 6)
+		display_crtc_powergate(crtcID, ATOM_DISABLE);
 	encoder_output_lock(true);
 	display_crtc_lock(crtcID, ATOM_ENABLE);
 	radeon_dpms_set(crtcID, B_DPMS_OFF);
@@ -234,6 +244,11 @@ radeon_set_display_mode(display_mode* mode)
 	radeon_dpms_set(crtcID, B_DPMS_ON);
 	display_crtc_lock(crtcID, ATOM_DISABLE);
 	encoder_output_lock(false);
+
+	if (display_get_encoder_mode(connectorIndex) == ATOM_ENCODER_MODE_HDMI) {
+		hdmi_avi_infoframe_program(crtcID, mode);
+		hdmi_registers_dump(crtcID);
+	}
 
 	#ifdef TRACE_MODE
 	// for debugging
@@ -309,31 +324,104 @@ is_mode_supported(display_mode* mode)
 {
 	bool sane = true;
 
-	// Validate modeline is within a sane range
+	// Validate modeline is within a sane range. The checks below divide
+	// by the totals, so stop here if it isn't.
 	if (is_mode_sane(mode) != B_OK)
-		sane = false;
+		return false;
 
 	// TODO: is_mode_supported on *which* display?
 	uint32 crtid = 0;
+
+	radeon_shared_info &info = *gInfo->shared_info;
+	uint32 pixelClock = mode->timing.pixel_clock;
+
+	// A laptop panel only takes its native timing, and the driver can't
+	// scale smaller modes up to it yet: offer only that.
+	{
+		connector_info* panel = gConnector[gDisplay[crtid]->connectorIndex];
+		const display_mode& native = gDisplay[crtid]->preferredMode;
+		if ((panel->type == VIDEO_CONNECTOR_LVDS
+				|| panel->type == VIDEO_CONNECTOR_EDP)
+			&& native.virtual_width > 0
+			&& (mode->timing.h_display != native.timing.h_display
+				|| mode->timing.v_display != native.timing.v_display)) {
+			TRACE("%s: rejecting %" B_PRIu32 "x%" B_PRIu32 ", not the "
+				"panel's native %" B_PRIu32 "x%" B_PRIu32 "\n", __func__,
+				(uint32)mode->timing.h_display, (uint32)mode->timing.v_display,
+				(uint32)native.timing.h_display,
+				(uint32)native.timing.v_display);
+			return false;
+		}
+	}
+
+	// Single-link TMDS tops out at 165 MHz, except that DCE6+ HDMI 1.3
+	// allows 340 MHz. Dual-link DVI and HDMI type B carry more (as Linux
+	// radeon_dvi_mode_valid()).
+	connector_info* connector = gConnector[gDisplay[crtid]->connectorIndex];
+	if (connector->encoder.type == VIDEO_ENCODER_TMDS) {
+		uint32 tmdsMaxKHz = 0;
+		switch (connector->objectID) {
+			case CONNECTOR_OBJECT_ID_SINGLE_LINK_DVI_I:
+			case CONNECTOR_OBJECT_ID_SINGLE_LINK_DVI_D:
+				tmdsMaxKHz = 165000;
+				break;
+			case CONNECTOR_OBJECT_ID_HDMI_TYPE_A:
+				tmdsMaxKHz = info.dceMajor >= 6 ? 340000 : 165000;
+				break;
+		}
+		if (tmdsMaxKHz != 0 && pixelClock > tmdsMaxKHz) {
+			TRACE("%s: rejecting %" B_PRIu32 "x%" B_PRIu32 ", pixel clock %"
+				B_PRIu32 " kHz is over the connector's %" B_PRIu32
+				" kHz TMDS limit\n", __func__, (uint32)mode->virtual_width,
+				(uint32)mode->virtual_height, pixelClock, tmdsMaxKHz);
+			sane = false;
+		}
+	}
+
+	// Above these pixel clocks scanout corrupts on these chips, measured on
+	// an HD 7470 (Caicos), HD 6570 (Turks), and HD 6850 (Barts). The likely
+	// cause is that without power management the memory clock stays at the
+	// low level the VBIOS left it at.
+	uint32 capKHz = 0;
+	if (info.chipsetID == RADEON_CAICOS)
+		capKHz = 165000;
+	else if (info.chipsetID == RADEON_TURKS)
+		capKHz = 250000;
+	else if (info.chipsetID == RADEON_BARTS)
+		capKHz = 340000;
+	if (capKHz != 0 && pixelClock > capKHz) {
+		TRACE("%s: rejecting %" B_PRIu32 "x%" B_PRIu32 ", pixel clock %"
+			B_PRIu32 " kHz is over this chip's %" B_PRIu32 " kHz cap\n",
+			__func__, (uint32)mode->virtual_width,
+			(uint32)mode->virtual_height, pixelClock, capKHz);
+		sane = false;
+	}
 
 	// if we have edid info, check frequency adginst crt reported valid ranges
 	if (gInfo->shared_info->has_edid
 		&& gDisplay[crtid]->foundRanges) {
 
+		// The range fields are uint32, so write the lower bound as
+		// freq + 1 < min: min - 1 would wrap around when min is 0.
+
 		// validate horizontal frequency range
 		uint32 hfreq = mode->timing.pixel_clock / mode->timing.h_total;
 		if (hfreq > gDisplay[crtid]->hfreqMax + 1
-			|| hfreq < gDisplay[crtid]->hfreqMin - 1) {
-			//TRACE("!!! mode below falls outside of hfreq range!\n");
+			|| hfreq + 1 < gDisplay[crtid]->hfreqMin) {
+			TRACE("%s: hfreq %" B_PRIu32 " outside EDID range [%" B_PRIu32
+				", %" B_PRIu32 "]\n", __func__, hfreq,
+				gDisplay[crtid]->hfreqMin, gDisplay[crtid]->hfreqMax);
 			sane = false;
 		}
 
 		// validate vertical frequency range
-		uint32 vfreq = mode->timing.pixel_clock / ((mode->timing.v_total
-			* mode->timing.h_total) / 1000);
+		uint32 vfreq = mode->timing.pixel_clock * 1000
+			/ (mode->timing.v_total * mode->timing.h_total);
 		if (vfreq > gDisplay[crtid]->vfreqMax + 1
-			|| vfreq < gDisplay[crtid]->vfreqMin - 1) {
-			//TRACE("!!! mode below falls outside of vfreq range!\n");
+			|| vfreq + 1 < gDisplay[crtid]->vfreqMin) {
+			TRACE("%s: vfreq %" B_PRIu32 " outside EDID range [%" B_PRIu32
+				", %" B_PRIu32 "]\n", __func__, vfreq,
+				gDisplay[crtid]->vfreqMin, gDisplay[crtid]->vfreqMax);
 			sane = false;
 		}
 	}
@@ -387,6 +475,14 @@ is_mode_sane(display_mode* mode)
 	if (mode->timing.v_total < mode->timing.v_display) {
 		TRACE("%s: ERROR: (%dx%d) "
 			"received v_total greater then v_display!\n",
+			__func__, mode->timing.h_display, mode->timing.v_display);
+		return B_ERROR;
+	}
+
+	// radeon_set_display_mode() passes modes from clients, not only from
+	// our own list, so don't divide by zero below
+	if (mode->timing.h_total == 0 || mode->timing.v_total == 0) {
+		TRACE("%s: ERROR: (%dx%d) received a zero h_total or v_total!\n",
 			__func__, mode->timing.h_display, mode->timing.v_display);
 		return B_ERROR;
 	}

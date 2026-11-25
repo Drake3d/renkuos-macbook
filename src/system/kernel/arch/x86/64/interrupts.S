@@ -357,6 +357,14 @@ STATIC_FUNCTION(intr_bottom_user):
 	// them after.
 	sti
 	call	thread_at_kernel_exit
+	// The thread was interrupted in userland, not in a syscall: there is
+	// nothing to restart. handle_signals() still asks for it when it takes
+	// the thread for one in sigsuspend() (it may be just before restarting
+	// it), and a flag left behind rewinds whatever comes next, the next
+	// syscall (run twice) or a signal frame's instruction pointer (two bytes
+	// into the instruction before it).
+	lock
+	andl	$~THREAD_FLAGS_RESTART_SYSCALL, THREAD_flags(%r12)
 	jmp		.Lkernel_exit_work_done
 FUNCTION_END(intr_bottom_user)
 
@@ -570,6 +578,12 @@ FUNCTION(x86_64_syscall_entry):
 	// On this return path it is possible that the frame has been modified,
 	// for example to execute a signal handler. In this case it is safer to
 	// return via IRET.
+	// Back from a signal handler, the interrupted code gets the FPU state
+	// arch_restore_signal_frame() restored, as on the fast path, also when
+	// there was more to do on the way out: cleared registers would be lost
+	// ones when the signal had interrupted it rather than a syscall.
+	cmpq	$SYSCALL_RESTORE_SIGNAL_FRAME, %r14
+	je		.Lrestore_fpu
 	CLEAR_FPU_STATE()
 	jmp .Liret
 
@@ -631,6 +645,18 @@ FUNCTION(x86_64_syscall_entry):
 	movq	%rbp, %rsp
 	jmp		.Lsyscall_return
 FUNCTION_END(x86_64_syscall_entry)
+
+
+/*!	SYSCALL from 32-bit code in a kernel without ia32 support (CSTAR, see
+	init_syscall_registers()). The CPU enters it in kernel mode, but still on
+	the user stack and with the user GS base, so it must use neither. It
+	returns to the caller at once with SYSRET in 32-bit operand size, which
+	takes the return EIP from ECX and RFLAGS from R11, where SYSCALL put them.
+	Interrupts are masked on entry (IA32_MSR_FMASK).
+*/
+FUNCTION(x86_64_syscall32_unsupported):
+	sysretl
+FUNCTION_END(x86_64_syscall32_unsupported)
 
 
 /*!	\fn void x86_return_to_userland(iframe* frame)

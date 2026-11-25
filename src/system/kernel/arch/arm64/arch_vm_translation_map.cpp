@@ -103,10 +103,14 @@ arch_vm_translation_map_init_post_area(kernel_args* args)
 
 	if (args->arch_args.uart.kind[0] != 0) {
 		// debug uart is already mapped by the efi loader
-		address = (void*)args->arch_args.uart.regs.start;
+		addr_t uartAddress = (addr_t)args->arch_args.uart.regs.start;
+		addr_t uartOffset = uartAddress - ROUNDDOWN(uartAddress, B_PAGE_SIZE);
+		addr_t uartAreaSize = ROUNDUP(args->arch_args.uart.regs.size + uartOffset,
+			B_PAGE_SIZE);
+		address = (void*)(uartAddress - uartOffset);
 		area_id area = vm_create_null_area(VMAddressSpace::KernelID(),
 			"debug uart map area", &address, B_EXACT_ADDRESS,
-			ROUNDUP(args->arch_args.uart.regs.size, B_PAGE_SIZE), 0);
+			uartAreaSize, 0);
 	}
 
 	return B_OK;
@@ -194,10 +198,10 @@ bool
 arch_vm_translation_map_is_kernel_page_accessible(addr_t va, uint32 protection)
 {
 	if (protection & B_KERNEL_WRITE_AREA) {
-		asm("at s1e1w, %0" : : "r"((uint64_t) va));
+		asm("at s1e1w, %0\n\tisb" : : "r"((uint64_t) va));
 		return (READ_SPECIALREG(PAR_EL1) & PAR_F) == 0;
 	} else {
-		asm("at s1e1r, %0" : : "r"((uint64_t) va));
+		asm("at s1e1r, %0\n\tisb" : : "r"((uint64_t) va));
 		return (READ_SPECIALREG(PAR_EL1) & PAR_F) == 0;
 	}
 }

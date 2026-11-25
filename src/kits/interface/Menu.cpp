@@ -44,6 +44,7 @@
 #include <AutoDeleter.h>
 #include <binary_compatibility/Interface.h>
 #include <BMCPrivate.h>
+#include <InterfacePrivate.h>
 #include <MenuPrivate.h>
 #include <MenuWindow.h>
 #include <ServerProtocol.h>
@@ -299,6 +300,7 @@ BMenu::BMenu(const char* name, menu_layout layout)
 	fMaxContentWidth(0.0f),
 	fInitMatrixSize(NULL),
 	fExtraMenuData(NULL),
+	fLayoutData(NULL),
 	fTrigger(0),
 	fResizeToFit(true),
 	fUseCachedMenuLayout(false),
@@ -333,6 +335,7 @@ BMenu::BMenu(const char* name, float width, float height)
 	fMaxContentWidth(0.0f),
 	fInitMatrixSize(NULL),
 	fExtraMenuData(NULL),
+	fLayoutData(NULL),
 	fTrigger(0),
 	fResizeToFit(true),
 	fUseCachedMenuLayout(false),
@@ -367,6 +370,7 @@ BMenu::BMenu(BMessage* archive)
 	fMaxContentWidth(0.0f),
 	fInitMatrixSize(NULL),
 	fExtraMenuData(NULL),
+	fLayoutData(NULL),
 	fTrigger(0),
 	fResizeToFit(true),
 	fUseCachedMenuLayout(false),
@@ -1390,6 +1394,7 @@ BMenu::BMenu(BRect frame, const char* name, uint32 resizingMode, uint32 flags,
 	fMaxContentWidth(0.0f),
 	fInitMatrixSize(NULL),
 	fExtraMenuData(NULL),
+	fLayoutData(NULL),
 	fTrigger(0),
 	fResizeToFit(resizeToFit),
 	fUseCachedMenuLayout(false),
@@ -1600,10 +1605,7 @@ BMenu::_InitData(BMessage* archive)
 	BPrivate::kEmptyMenuLabel = B_TRANSLATE("<empty>");
 
 	// TODO: Get _color, _fname, _fflt from the message, if present
-	BFont font;
-	font.SetFamilyAndStyle(sMenuInfo.f_family, sMenuInfo.f_style);
-	font.SetSize(sMenuInfo.font_size);
-	SetFont(&font, B_FONT_FAMILY_AND_STYLE | B_FONT_SIZE);
+	SetFont(BPrivate::menu_font(), B_FONT_FAMILY_AND_STYLE | B_FONT_SIZE);
 
 	fExtraMenuData = new (nothrow) BPrivate::ExtraMenuData();
 
@@ -2829,6 +2831,9 @@ BMenu::_ComputeMatrixLayout(BRect &frame)
 void
 BMenu::LayoutInvalidated(bool descendants)
 {
+	if (fLayoutData == NULL)
+		return;
+
 	fUseCachedMenuLayout = false;
 	fLayoutData->preferred.Set(B_SIZE_UNSET, B_SIZE_UNSET);
 }

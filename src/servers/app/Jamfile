@@ -18,6 +18,9 @@ local decorator_src =
 	DecorManager.cpp
 	Decorator.cpp
 	DefaultDecorator.cpp
+	RoundedDecorator.cpp
+	StyleCanvas.cpp
+	StyleDecorator.cpp
 	DefaultWindowBehaviour.cpp
 	MagneticBorder.cpp
 	TabDecorator.cpp
@@ -36,35 +39,18 @@ local font_src =
 	AppFontManager.cpp
 	;
 
-UseBuildFeatureHeaders freetype ;
-if [ FIsBuildFeatureEnabled fontconfig ] {
-	SubDirC++Flags -DFONTCONFIG_ENABLED ;
-	UseBuildFeatureHeaders fontconfig ;
-	Includes [ FGristFiles AppServer.cpp BitmapManager.cpp Canvas.cpp
-	ClientMemoryAllocator.cpp Desktop.cpp DesktopSettings.cpp
-	DrawState.cpp DrawingEngine.cpp Layer.cpp PictureBoundingBoxPlayer.cpp
-	ServerApp.cpp ServerBitmap.cpp ServerCursor.cpp ServerFont.cpp
-	ServerPicture.cpp ServerWindow.cpp View.cpp Window.cpp WorkspacesView.cpp
-	$(decorator_src) $(font_src) ]
-	: [ BuildFeatureAttribute freetype : headers ]
-	  [ BuildFeatureAttribute fontconfig : headers ] ;
-} else {
-	Includes [ FGristFiles AppServer.cpp BitmapManager.cpp Canvas.cpp
-	ClientMemoryAllocator.cpp Desktop.cpp DesktopSettings.cpp
-	DrawState.cpp DrawingEngine.cpp Layer.cpp PictureBoundingBoxPlayer.cpp
-	ServerApp.cpp ServerBitmap.cpp ServerCursor.cpp ServerFont.cpp
-	ServerPicture.cpp ServerWindow.cpp View.cpp Window.cpp WorkspacesView.cpp
-	$(decorator_src) $(font_src) ]
-	: [ BuildFeatureAttribute freetype : headers ] ;
-}
-
-Application app_server :
+# Most sources reach the font headers through Desktop.h, which need the
+# freetype headers. So all sources depend on them, or a parallel build fails
+# with "ft2build.h: No such file or directory" whenever freetype is not
+# extracted yet.
+local app_server_src =
 	Angle.cpp
 	AppServer.cpp
 	#BitfieldRegion.cpp
 	BitmapManager.cpp
 	Canvas.cpp
 	ClientMemoryAllocator.cpp
+	Compositor.cpp
 	CursorManager.cpp
 	CursorSet.cpp
 	DelayedMessage.cpp
@@ -100,12 +86,31 @@ Application app_server :
 	View.cpp
 	VirtualScreen.cpp
 	Window.cpp
+	WindowBuffer.cpp
 	WindowList.cpp
+	WindowShape.cpp
+	WindowWobble.cpp
 	Workspace.cpp
 	WorkspacesView.cpp
 
 	$(decorator_src)
 	$(font_src)
+	;
+
+UseBuildFeatureHeaders freetype ;
+if [ FIsBuildFeatureEnabled fontconfig ] {
+	SubDirC++Flags -DFONTCONFIG_ENABLED ;
+	UseBuildFeatureHeaders fontconfig ;
+	Includes [ FGristFiles $(app_server_src) ]
+	: [ BuildFeatureAttribute freetype : headers ]
+	  [ BuildFeatureAttribute fontconfig : headers ] ;
+} else {
+	Includes [ FGristFiles $(app_server_src) ]
+	: [ BuildFeatureAttribute freetype : headers ] ;
+}
+
+Application app_server :
+	$(app_server_src)
 
 	# libraries
 	:

@@ -50,6 +50,7 @@
 #include "BitmapManager.h"
 #include "CursorManager.h"
 #include "CursorSet.h"
+#include "Compositor.h"
 #include "Desktop.h"
 #include "DecorManager.h"
 #include "DrawingEngine.h"
@@ -58,6 +59,7 @@
 #include "HWInterface.h"
 #include "InputManager.h"
 #include "OffscreenServerWindow.h"
+#include "RenderingBuffer.h"
 #include "Screen.h"
 #include "ServerBitmap.h"
 #include "ServerConfig.h"
@@ -109,7 +111,11 @@ ServerApp::ServerApp(Desktop* desktop, port_id clientReplyPort,
 	fCursorHideLevel(0),
 	fIsActive(false),
 	fMemoryAllocator(new (std::nothrow) ClientMemoryAllocator(this), true),
-	fAppFontManager(NULL)
+	fAppFontManager(NULL),
+	fScreenObserver(NULL),
+	fScreenObserverSourceArea(-1),
+	fScreenObserverArea(-1),
+	fScreenObserverBits(NULL)
 {
 	if (fSignature.IsEmpty())
 		fSignature = "application/no-signature";
@@ -170,6 +176,8 @@ ServerApp::~ServerApp()
 	snooze(20000);
 
 	fDesktop->RevertScreenModes(fTemporaryDisplayModeChange);
+
+	_StopScreenObserver();
 
 	fWindowListLock.Lock();
 	for (int32 i = fWindowList.CountItems(); i-- > 0;) {
@@ -391,6 +399,60 @@ ServerApp::Workspaces() const
 	\param token ID token of the bitmap to find
 	\return The bitmap having that ID or NULL if not found
 */
+/*!	RenkuOS: maps the client's area that AS_SCREEN_OBSERVER_READ copies
+	into. Only an area of the client's own team is accepted, so a client
+	cannot make app_server write into another team's memory.
+*/
+status_t
+ServerApp::_SetScreenObserverArea(area_id source, bool& changed)
+{
+	changed = false;
+	if (source == fScreenObserverSourceArea && fScreenObserverArea >= 0)
+		return B_OK;
+
+	_DeleteScreenObserverArea();
+
+	area_info info;
+	if (get_area_info(source, &info) != B_OK || info.team != fClientTeam)
+		return B_BAD_VALUE;
+
+	void* address;
+	area_id area = clone_area("screen observer", &address, B_ANY_ADDRESS,
+		B_READ_AREA | B_WRITE_AREA, source);
+	if (area < 0)
+		return area;
+
+	fScreenObserverSourceArea = source;
+	fScreenObserverArea = area;
+	fScreenObserverBits = (uint8*)address;
+	changed = true;
+	return B_OK;
+}
+
+
+void
+ServerApp::_DeleteScreenObserverArea()
+{
+	if (fScreenObserverArea >= 0)
+		delete_area(fScreenObserverArea);
+	fScreenObserverSourceArea = -1;
+	fScreenObserverArea = -1;
+	fScreenObserverBits = NULL;
+}
+
+
+void
+ServerApp::_StopScreenObserver()
+{
+	if (fScreenObserver != NULL) {
+		fDesktop->HWInterface()->RemoveScreenObserver(fScreenObserver);
+		delete fScreenObserver;
+		fScreenObserver = NULL;
+	}
+	_DeleteScreenObserverArea();
+}
+
+
 ServerBitmap*
 ServerApp::GetBitmap(int32 token) const
 {
@@ -680,13 +742,20 @@ ServerApp::_DispatchMessage(int32 code, BPrivate::LinkReceiver& link)
 
 			BString path;
 			status_t error = B_ERROR;
+			bool changed = false;
 			if (link.ReadString(path) == B_OK) {
 				LockedDesktopSettings settings(fDesktop);
+				changed = settings.ControlLook() != path;
 				error = settings.SetControlLook(path.String());
 			}
 
 			fLink.StartMessage(error);
 			fLink.Flush();
+
+			if (changed) {
+				BMessage update(B_CONTROL_LOOK_UPDATED);
+				fDesktop->SendMessageToAllClients(&update);
+			}
 			break;
 		}
 
@@ -1405,8 +1474,16 @@ ServerApp::_DispatchMessage(int32 code, BPrivate::LinkReceiver& link)
 		{
 			STRACE(("ServerApp %s: Set menu info\n", Signature()));
 			menu_info info;
+			bool fontChanged = false;
 			if (link.Read<menu_info>(&info) == B_OK) {
 				LockedDesktopSettings settings(fDesktop);
+
+				menu_info current;
+				settings.GetMenuInfo(current);
+				fontChanged = strcmp(current.f_family, info.f_family) != 0
+					|| strcmp(current.f_style, info.f_style) != 0
+					|| current.font_size != info.font_size;
+
 				settings.SetMenuInfo(info);
 					// TODO: SetMenuInfo() should do some validity check, so
 					//	that the answer we're giving can actually be useful
@@ -1414,6 +1491,11 @@ ServerApp::_DispatchMessage(int32 code, BPrivate::LinkReceiver& link)
 
 			fLink.StartMessage(B_OK);
 			fLink.Flush();
+
+			if (fontChanged) {
+				BMessage update(B_FONTS_UPDATED);
+				fDesktop->SendMessageToAllClients(&update);
+			}
 			break;
 		}
 
@@ -1794,15 +1876,32 @@ ServerApp::_DispatchMessage(int32 code, BPrivate::LinkReceiver& link)
 						// locking the desktop (through LockedDesktopSettings
 						// below)
 
-					LockedDesktopSettings settings(fDesktop);
+					bool changed = false;
+					{
+						LockedDesktopSettings settings(fDesktop);
 
-					// TODO: Should we also update our internal copies now?
-					if (strcmp(type, "plain") == 0)
-						settings.SetDefaultPlainFont(font);
-					else if (strcmp(type, "bold") == 0)
-						settings.SetDefaultBoldFont(font);
-					else if (strcmp(type, "fixed") == 0)
-						settings.SetDefaultFixedFont(font);
+						ServerFont current;
+						if (strcmp(type, "plain") == 0) {
+							settings.GetDefaultPlainFont(current);
+							changed = !(current == font);
+							settings.SetDefaultPlainFont(font);
+						} else if (strcmp(type, "bold") == 0) {
+							settings.GetDefaultBoldFont(current);
+							changed = !(current == font);
+							settings.SetDefaultBoldFont(font);
+						} else if (strcmp(type, "fixed") == 0) {
+							settings.GetDefaultFixedFont(current);
+							changed = !(current == font);
+							settings.SetDefaultFixedFont(font);
+						}
+					}
+
+					// Applications get the new font through
+					// AS_GET_SYSTEM_FONTS, which also updates our copies.
+					if (changed) {
+						BMessage update(B_FONTS_UPDATED);
+						fDesktop->SendMessageToAllClients(&update);
+					}
 				} else
 					gFontManager->Unlock();
 			}
@@ -3400,6 +3499,8 @@ ServerApp::_DispatchMessage(int32 code, BPrivate::LinkReceiver& link)
 
 			BReference<ServerBitmap> bitmap(GetBitmap(token), true);
 			if (bitmap != NULL) {
+				if (Compositor* compositor = fDesktop->GetCompositor())
+					compositor->Flush();
 				if (fDesktop->GetDrawingEngine()->LockExclusiveAccess()) {
 					success = fDesktop->GetDrawingEngine()->ReadBitmap(bitmap,
 						drawCursor, bounds) == B_OK;
@@ -3412,6 +3513,159 @@ ServerApp::_DispatchMessage(int32 code, BPrivate::LinkReceiver& link)
 			else
 				fLink.StartMessage(B_BAD_VALUE);
 
+			fLink.Flush();
+			break;
+		}
+
+		case AS_SCREEN_OBSERVER_START:
+		{
+			// RenkuOS: start following changes to the screen. The first
+			// AS_SCREEN_OBSERVER_READ then copies the whole screen.
+			status_t status = B_OK;
+			if (fScreenObserver == NULL) {
+				fScreenObserver = new(std::nothrow) ScreenObserver;
+				if (fScreenObserver == NULL)
+					status = B_NO_MEMORY;
+				else if (!fDesktop->HWInterface()->AddScreenObserver(
+						fScreenObserver)) {
+					delete fScreenObserver;
+					fScreenObserver = NULL;
+					status = B_NO_MEMORY;
+				}
+			}
+			fLink.StartMessage(status);
+			fLink.Flush();
+			break;
+		}
+
+		case AS_SCREEN_OBSERVER_STOP:
+		{
+			_StopScreenObserver();
+			fLink.StartMessage(B_OK);
+			fLink.Flush();
+			break;
+		}
+
+		case AS_SCREEN_OBSERVER_READ:
+		{
+			// RenkuOS: copies the parts of the screen that changed since the
+			// last read into an area of the client's, as 32-bit pixels with
+			// the screen's size. The copy comes from the drawing buffer,
+			// which is the back buffer in RAM on double-buffered
+			// interfaces, so it holds no cursor.
+			//
+			// Attached:
+			//	1) area_id of a cloneable area that belongs to the client
+			//	2) int32 bytes per row in that area
+			// Returns:
+			//	B_OK, then int32 width, int32 height, int32 cursor generation,
+			//		int32 count, and count clipping_rects that were copied
+			//	B_MISMATCHED_VALUES, then int32 width and int32 height, when
+			//		the area is too small for the screen
+			//	B_NOT_SUPPORTED when the drawing buffer is not 32-bit
+			//	B_BAD_VALUE without an observer or a usable area
+			area_id area;
+			int32 bytesPerRow;
+			link.Read<area_id>(&area);
+			bool newArea = false;
+			if (link.Read<int32>(&bytesPerRow) != B_OK
+				|| fScreenObserver == NULL
+				|| _SetScreenObserverArea(area, newArea) != B_OK) {
+				fLink.StartMessage(B_BAD_VALUE);
+				fLink.Flush();
+				break;
+			}
+
+			::HWInterface* interface = fDesktop->HWInterface();
+			if (newArea) {
+				// A new area holds nothing yet.
+				interface->IncludeAllScreenChanges(fScreenObserver);
+			}
+
+			// Take the changes before reading: whatever is drawn while
+			// we copy is reported again by the next read.
+			BRegion region;
+			bool all;
+			interface->TakeScreenChanges(fScreenObserver, region, all);
+
+			if (!interface->LockParallelAccess()) {
+				interface->IncludeAllScreenChanges(fScreenObserver);
+				fLink.StartMessage(B_ERROR);
+				fLink.Flush();
+				break;
+			}
+
+			status_t status = B_OK;
+			int32 width = 0;
+			int32 height = 0;
+			RenderingBuffer* buffer = interface->DrawingBuffer();
+			if (buffer == NULL)
+				status = B_ERROR;
+			else {
+				width = buffer->Width();
+				height = buffer->Height();
+				if (buffer->ColorSpace() != B_RGB32
+					&& buffer->ColorSpace() != B_RGBA32) {
+					status = B_NOT_SUPPORTED;
+				} else {
+					// The client can resize its area at any time, which
+					// resizes our clone too: check the clone's current
+					// size, in 64 bits so that nothing wraps on 32-bit
+					// targets.
+					area_info info;
+					if (width <= 0 || height <= 0
+						|| get_area_info(fScreenObserverArea, &info) != B_OK) {
+						status = B_BAD_VALUE;
+					} else if (bytesPerRow < width * 4
+						|| (uint64)bytesPerRow * height > info.size) {
+						status = B_MISMATCHED_VALUES;
+					}
+				}
+			}
+
+			if (status == B_OK) {
+				BRegion screen(BRect(0, 0, width - 1, height - 1));
+				if (all)
+					region = screen;
+				else
+					region.IntersectWith(&screen);
+
+				const uint8* source = (const uint8*)buffer->Bits();
+				uint32 sourceBPR = buffer->BytesPerRow();
+				uint8* target = fScreenObserverBits;
+				for (int32 i = 0; i < region.CountRects(); i++) {
+					clipping_rect rect = region.RectAtInt(i);
+					size_t bytes = (rect.right - rect.left + 1) * 4;
+					for (int32 y = rect.top; y <= rect.bottom; y++) {
+						memcpy(target + (size_t)y * bytesPerRow
+								+ rect.left * 4,
+							source + (size_t)y * sourceBPR + rect.left * 4,
+							bytes);
+					}
+				}
+			}
+			interface->UnlockParallelAccess();
+
+			if (status != B_OK) {
+				// Nothing was copied: the next read has to copy everything.
+				interface->IncludeAllScreenChanges(fScreenObserver);
+				fLink.StartMessage(status);
+				if (status == B_MISMATCHED_VALUES) {
+					fLink.Attach<int32>(width);
+					fLink.Attach<int32>(height);
+				}
+				fLink.Flush();
+				break;
+			}
+
+			int32 count = region.CountRects();
+			fLink.StartMessage(B_OK);
+			fLink.Attach<int32>(width);
+			fLink.Attach<int32>(height);
+			fLink.Attach<int32>(interface->CursorGeneration());
+			fLink.Attach<int32>(count);
+			for (int32 i = 0; i < count; i++)
+				fLink.Attach<clipping_rect>(region.RectAtInt(i));
 			fLink.Flush();
 			break;
 		}
@@ -3477,6 +3731,117 @@ ServerApp::_DispatchMessage(int32 code, BPrivate::LinkReceiver& link)
 			break;
 		}
 
+		case AS_SET_COMPOSITED_DESKTOP:
+		{
+			bool composited;
+			if (link.Read<bool>(&composited) == B_OK) {
+				LockedDesktopSettings settings(fDesktop);
+				settings.SetCompositedDesktop(composited);
+			}
+			break;
+		}
+		case AS_GET_COMPOSITED_DESKTOP:
+		{
+			DesktopSettings settings(fDesktop);
+			fLink.StartMessage(B_OK);
+			fLink.Attach<bool>(settings.CompositedDesktop());
+			fLink.Flush();
+			break;
+		}
+		case AS_IS_DESKTOP_COMPOSITED:
+		{
+			fLink.StartMessage(B_OK);
+			fLink.Attach<bool>(fDesktop->GetCompositor() != NULL);
+			fLink.Flush();
+			break;
+		}
+		case AS_SET_COMPOSITED_SHADOWS:
+		{
+			bool shadows;
+			if (link.Read<bool>(&shadows) == B_OK) {
+				LockedDesktopSettings settings(fDesktop);
+				settings.SetCompositedShadows(shadows);
+			}
+			fDesktop->WindowShapesChanged();
+			break;
+		}
+		case AS_GET_COMPOSITED_SHADOWS:
+		{
+			DesktopSettings settings(fDesktop);
+			fLink.StartMessage(B_OK);
+			fLink.Attach<bool>(settings.CompositedShadows());
+			fLink.Flush();
+			break;
+		}
+		case AS_SET_COMPOSITED_ROUNDED_CORNERS:
+		{
+			bool rounded;
+			if (link.Read<bool>(&rounded) == B_OK) {
+				LockedDesktopSettings settings(fDesktop);
+				settings.SetCompositedRoundedCorners(rounded);
+			}
+			fDesktop->WindowShapesChanged();
+			break;
+		}
+		case AS_GET_COMPOSITED_ROUNDED_CORNERS:
+		{
+			DesktopSettings settings(fDesktop);
+			fLink.StartMessage(B_OK);
+			fLink.Attach<bool>(settings.CompositedRoundedCorners());
+			fLink.Flush();
+			break;
+		}
+		case AS_SET_COMPOSITED_DRAG_TRANSPARENCY:
+		{
+			bool transparent;
+			if (link.Read<bool>(&transparent) == B_OK) {
+				LockedDesktopSettings settings(fDesktop);
+				settings.SetCompositedDragTransparency(transparent);
+			}
+			break;
+		}
+		case AS_GET_COMPOSITED_DRAG_TRANSPARENCY:
+		{
+			DesktopSettings settings(fDesktop);
+			fLink.StartMessage(B_OK);
+			fLink.Attach<bool>(settings.CompositedDragTransparency());
+			fLink.Flush();
+			break;
+		}
+		case AS_SET_COMPOSITED_WOBBLY_WINDOWS:
+		{
+			bool wobbly;
+			if (link.Read<bool>(&wobbly) == B_OK) {
+				LockedDesktopSettings settings(fDesktop);
+				settings.SetCompositedWobblyWindows(wobbly);
+			}
+			break;
+		}
+		case AS_GET_COMPOSITED_WOBBLY_WINDOWS:
+		{
+			DesktopSettings settings(fDesktop);
+			fLink.StartMessage(B_OK);
+			fLink.Attach<bool>(settings.CompositedWobblyWindows());
+			fLink.Flush();
+			break;
+		}
+		case AS_SET_COMPOSITED_WOBBLINESS:
+		{
+			uint8 wobbliness;
+			if (link.Read<uint8>(&wobbliness) == B_OK) {
+				LockedDesktopSettings settings(fDesktop);
+				settings.SetCompositedWobbliness(min_c(wobbliness, 100));
+			}
+			break;
+		}
+		case AS_GET_COMPOSITED_WOBBLINESS:
+		{
+			DesktopSettings settings(fDesktop);
+			fLink.StartMessage(B_OK);
+			fLink.Attach<uint8>(settings.CompositedWobbliness());
+			fLink.Flush();
+			break;
+		}
 		case AS_GET_SUBPIXEL_ANTIALIASING:
 		{
 			DesktopSettings settings(fDesktop);

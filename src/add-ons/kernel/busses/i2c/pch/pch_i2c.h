@@ -121,10 +121,26 @@ typedef struct {
 	size_t	length;
 	uint32	flags;
 	int32	error;
+	uint32	abort_source;	// IC_TX_ABRT_SOURCE of the last abort
 
 	mutex	lock;
 	status_t (*scan_bus)(i2c_bus_cookie cookie);
+
+	// The bus is shared with the P-Unit (ACPI _SEM returns 1): every
+	// transfer has to hold the P-Unit semaphore.
+	bool	punit_semaphore;
+
+	// Called once the controller is ready for transfers, and before it is
+	// shut down (for the ACPI GenericSerialBus operation region).
+	void	(*bus_started)(void* cookie);
+	void	(*bus_stopping)(void* cookie);
+	void*	bus_hook_cookie;
 } pch_i2c_sim_info;
+
+
+status_t pch_i2c_transfer(pch_i2c_sim_info* bus, i2c_op op,
+	i2c_addr slaveAddress, const void* cmdBuffer, size_t cmdLength,
+	void* dataBuffer, size_t dataLength);
 
 
 #endif // _PCH_I2C_H

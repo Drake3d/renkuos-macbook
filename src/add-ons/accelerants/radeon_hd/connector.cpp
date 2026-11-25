@@ -127,7 +127,8 @@ connector_pick_atom_hpdid(uint32 connectorIndex)
 	if (info.dceMajor >= 4
 		&& gGPIOInfo[hpdPinIndex]->valid) {
 
-		// See mmDC_GPIO_HPD_A in drm for register value
+		// See mmDC_GPIO_HPD_A in drm for register value. hwReg is a byte
+		// offset, while the SEA, VOL, and CAR values are dword indices.
 		uint32 targetReg = AVIVO_DC_GPIO_HPD_A;
 		if (info.dceMajor >= 13) {
 			ERROR("WARNING: CHECK NEW DCE mmDC_GPIO_HPD_A value!\n");
@@ -136,11 +137,11 @@ connector_pick_atom_hpdid(uint32 connectorIndex)
 			|| (info.dceMajor == 11 && info.dceMinor == 2))
 			targetReg = POL_mmDC_GPIO_HPD_A;
 		else if (info.dceMajor >= 11)
-			targetReg = CAR_mmDC_GPIO_HPD_A;
+			targetReg = CAR_mmDC_GPIO_HPD_A * 4;
 		else if (info.dceMajor >= 10)
-			targetReg = VOL_mmDC_GPIO_HPD_A;
+			targetReg = VOL_mmDC_GPIO_HPD_A * 4;
 		else if (info.dceMajor >= 8)
-			targetReg = SEA_mmDC_GPIO_HPD_A;
+			targetReg = SEA_mmDC_GPIO_HPD_A * 4;
 		else if (info.dceMajor >= 6)
 			targetReg = SI_DC_GPIO_HPD_A;
 		else if (info.dceMajor >= 4)
@@ -799,7 +800,7 @@ connector_probe()
 							== encoderObjectRaw) {
 							ATOM_COMMON_RECORD_HEADER* record
 								= (ATOM_COMMON_RECORD_HEADER*)
-								((uint16*)gAtomContext->bios + tableOffset
+								(gAtomContext->bios + tableOffset
 								+ B_LENDIAN_TO_HOST_INT16(
 								encoderObject->asObjects[k].usRecordOffset));
 							ATOM_ENCODER_CAP_RECORD* capRecord;
@@ -867,7 +868,7 @@ connector_probe()
 							= B_LENDIAN_TO_HOST_INT16(routerObject->asObjects[k].usObjectID);
 						if (B_LENDIAN_TO_HOST_INT16(path->usGraphicObjIds[j]) == routerObjectID) {
 							ATOM_COMMON_RECORD_HEADER* record = (ATOM_COMMON_RECORD_HEADER*)
-								((uint16*)gAtomContext->bios + tableOffset
+								(gAtomContext->bios + tableOffset
 								+ B_LENDIAN_TO_HOST_INT16(
 								routerObject->asObjects[k].usRecordOffset));
 							ATOM_I2C_RECORD* i2cRecord;
@@ -876,7 +877,7 @@ connector_probe()
 							ATOM_ROUTER_DATA_CLOCK_PATH_SELECT_RECORD* cdPath;
 							ATOM_SRC_DST_TABLE_FOR_ONE_OBJECT* routerConnTable
 								= (ATOM_SRC_DST_TABLE_FOR_ONE_OBJECT *)
-								((uint16*)gAtomContext->bios + tableOffset
+								(gAtomContext->bios + tableOffset
 								+ B_LENDIAN_TO_HOST_INT16(
 								routerObject->asObjects[k].usSrcDstTableOffset));
 							uint8* destObjCount = (uint8*)((uint8*)routerConnTable + 1

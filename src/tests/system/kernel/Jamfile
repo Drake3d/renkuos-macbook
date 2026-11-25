@@ -11,6 +11,9 @@ SimpleTest fibo_exec : fibo_exec.cpp ;
 
 SimpleTest fifo_poll_test : fifo_poll_test.cpp ;
 
+SimpleTest signal_fpu_test : signal_fpu_test.cpp ;
+SimpleTest signal_suspend_resume_test : signal_suspend_resume_test.cpp ;
+
 SimpleTest hello_avx : hello_avx.c ;
 local avxSource = [ FGristFiles hello_avx.c ] ;
 local avxObject = $(avxSource:S=$(SUFOBJ)) ;
@@ -59,6 +62,8 @@ SimpleTest select_close_test : select_close_test.cpp ;
 
 SimpleTest sem_acquire_test1 : sem_acquire_test1.cpp : be ;
 
+SimpleTest setrlimit_core_test : setrlimit_core_test.cpp ;
+
 SimpleTest spinlock_contention : spinlock_contention.cpp ;
 
 SimpleTest syscall_filter_test : syscall_filter_test.cpp : network ;
@@ -80,6 +85,7 @@ SimpleTest yield_test : yield_test.cpp ;
 SimpleTest sigint_bug113_test : sigint_bug113_test.cpp ;
 
 SimpleTest sigsuspend_test : sigsuspend_test.cpp ;
+SimpleTest sig_fault_blocked_test : sig_fault_blocked_test.cpp ;
 
 SubInclude HAIKU_TOP src tests system kernel cache ;
 SubInclude HAIKU_TOP src tests system kernel fs ;

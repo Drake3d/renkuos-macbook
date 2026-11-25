@@ -44,7 +44,6 @@ static const char* const kIDAttributeName = "id";
 #endif
 
 
-// init_attribute_dir_base_dir
 static status_t
 init_attribute_dir_base_dir()
 {
@@ -65,17 +64,22 @@ init_attribute_dir_base_dir()
 			initError = B_FILE_ERROR;
 		}
 
-	} else {
-		// doesn't exist yet: create it
-		if (mkdir(sAttributeDirBasePath, S_IRWXU | S_IRWXG | S_IRWXO) < 0)
-			initError = errno;
+	} else if (mkdir(sAttributeDirBasePath, S_IRWXU | S_IRWXG | S_IRWXO) < 0) {
+		// doesn't exist yet and creating it failed -- another build process
+		// may have created it at the same time, which is fine as long as it
+		// is a directory
+		initError = errno;
+		if (initError == EEXIST) {
+			initError = lstat(sAttributeDirBasePath, &st) == 0
+				&& S_ISDIR(st.st_mode) ? B_OK : B_FILE_ERROR;
+		}
 	}
 
 	initialized = true;
 	return initError;
 }
 
-// escape_attr_name
+
 static string
 escape_attr_name(const char *name)
 {
@@ -95,7 +99,7 @@ escape_attr_name(const char *name)
 	return escapedName;
 }
 
-// deescape_attr_name
+
 static string
 deescape_attr_name(const char *name)
 {
@@ -278,7 +282,6 @@ get_attribute_dir_path_needed(NodeRef ref, const char *path, int fd,
 #endif
 
 
-// ensure_attribute_dir_exists
 static status_t
 ensure_attribute_dir_exists(NodeRef ref, const char *path, int fd)
 {
@@ -306,14 +309,19 @@ ensure_attribute_dir_exists(NodeRef ref, const char *path, int fd)
 		return B_OK;
 	}
 
-	// doesn't exist yet: create it
-	if (mkdir(attrDirPath.c_str(), S_IRWXU | S_IRWXG | S_IRWXO) < 0)
-		return errno;
+	// doesn't exist yet: create it -- another build process may create it at
+	// the same time, which is fine as long as it is a directory
+	if (mkdir(attrDirPath.c_str(), S_IRWXU | S_IRWXG | S_IRWXO) < 0) {
+		if (errno != EEXIST)
+			return errno;
+		if (lstat(attrDirPath.c_str(), &st) != 0 || !S_ISDIR(st.st_mode))
+			return B_FILE_ERROR;
+	}
 
 	return B_OK;
 }
 
-// open_attr_dir
+
 static DIR *
 open_attr_dir(NodeRef ref, const char *path, int fd)
 {
@@ -329,7 +337,7 @@ open_attr_dir(NodeRef ref, const char *path, int fd)
 	return opendir(dirPath.c_str());
 }
 
-// get_attribute_path
+
 static status_t
 get_attribute_path(NodeRef ref, const char *path, int fd,
 	const char *attribute, string &attrPath, string &typePath)
@@ -339,10 +347,8 @@ get_attribute_path(NodeRef ref, const char *path, int fd,
 
 	// make sure the attribute dir for the node exits
 	status_t error = ensure_attribute_dir_exists(ref, path, fd);
-	if (error != B_OK) {
-		errno = error;
-		return -1;
-	}
+	if (error != B_OK)
+		return error;
 
 	// construct the attribute path
 	attrPath = get_attribute_dir_path(ref, path, fd) + '/';
@@ -354,7 +360,7 @@ get_attribute_path(NodeRef ref, const char *path, int fd,
 }
 
 
-// get_attribute_path_virtual_fd
+
 static status_t
 get_attribute_path_virtual_fd(int fd, const char *attribute, string &attrPath,
 	string &typePath)
@@ -377,7 +383,7 @@ get_attribute_path_virtual_fd(int fd, const char *attribute, string &attrPath,
 }
 
 
-// get_attribute_path
+
 static status_t
 get_attribute_path(int fd, const char *attribute, string &attrPath,
 	string &typePath)
@@ -385,7 +391,7 @@ get_attribute_path(int fd, const char *attribute, string &attrPath,
 	if (get_descriptor(fd)) {
 		// This is a virtual file descriptor -- we have a special function
 		// for handling it.
-		return  get_attribute_path_virtual_fd(fd, attribute, attrPath,
+		return get_attribute_path_virtual_fd(fd, attribute, attrPath,
 			typePath);
 	} else {
 		// This is a real (i.e. system) file descriptor -- fstat() it and
@@ -405,7 +411,7 @@ get_attribute_path(int fd, const char *attribute, string &attrPath,
 // # pragma mark - Public API
 
 
-// fs_open_attr_dir
+
 DIR *
 fs_open_attr_dir(const char *path)
 {
@@ -416,7 +422,7 @@ fs_open_attr_dir(const char *path)
 	return open_attr_dir(NodeRef(st), path, -1);
 }
 
-// fs_fopen_attr_dir
+
 DIR *
 fs_fopen_attr_dir(int fd)
 {
@@ -439,14 +445,14 @@ fs_fopen_attr_dir(int fd)
 		(pathValid ? -1 : fd));
 }
 
-// fs_close_attr_dir
+
 int
 fs_close_attr_dir(DIR *dir)
 {
 	return closedir(dir);
 }
 
-// fs_read_attr_dir
+
 struct dirent *
 fs_read_attr_dir(DIR *dir)
 {
@@ -466,14 +472,14 @@ fs_read_attr_dir(DIR *dir)
 	}
 }
 
-// fs_rewind_attr_dir
+
 void
 fs_rewind_attr_dir(DIR *dir)
 {
 	rewinddir(dir);
 }
 
-// fs_fopen_attr
+
 int
 fs_fopen_attr(int fd, const char *attribute, uint32 type, int openMode)
 {
@@ -531,14 +537,14 @@ fs_fopen_attr(int fd, const char *attribute, uint32 type, int openMode)
 	return attrFD;
 }
 
-// fs_close_attr
+
 int
 fs_close_attr(int fd)
 {
 	return close(fd);
 }
 
-// fs_read_attr
+
 ssize_t
 fs_read_attr(int fd, const char *attribute, uint32 type, off_t pos,
 	void *buffer, size_t readBytes)
@@ -563,7 +569,7 @@ fs_read_attr(int fd, const char *attribute, uint32 type, off_t pos,
 	return bytesRead;
 }
 
-// fs_write_attr
+
 ssize_t
 fs_write_attr(int fd, const char *attribute, uint32 type, off_t pos,
 	const void *buffer, size_t readBytes)
@@ -598,7 +604,7 @@ fs_write_attr(int fd, const char *attribute, uint32 type, off_t pos,
 	return bytesWritten;
 }
 
-// fs_remove_attr
+
 int
 fs_remove_attr(int fd, const char *attribute)
 {
@@ -625,7 +631,7 @@ fs_remove_attr(int fd, const char *attribute)
 	return B_OK;
 }
 
-// fs_stat_attr
+
 int
 fs_stat_attr(int fd, const char *attribute, struct attr_info *attrInfo)
 {
@@ -676,7 +682,7 @@ fs_stat_attr(int fd, const char *attribute, struct attr_info *attrInfo)
 // #pragma mark - Private Syscalls
 
 
-// _kern_open_attr_dir
+
 int
 _kern_open_attr_dir(int fd, const char *path)
 {
@@ -709,7 +715,7 @@ _kern_open_attr_dir(int fd, const char *path)
 	return add_descriptor(descriptor);
 }
 
-// _kern_rename_attr
+
 status_t
 _kern_rename_attr(int fromFile, const char *fromName, int toFile,
 	const char *toName)
@@ -748,7 +754,7 @@ _kern_rename_attr(int fromFile, const char *fromName, int toFile,
 	return B_OK;
 }
 
-// _kern_remove_attr
+
 status_t
 _kern_remove_attr(int fd, const char *name)
 {
@@ -773,7 +779,6 @@ _kern_remove_attr(int fd, const char *name)
 }
 
 
-// __get_attribute_dir_path
 extern "C" bool __get_attribute_dir_path(const struct stat* st,
 	const char* path, char* buffer);
 bool

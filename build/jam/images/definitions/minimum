@@ -75,6 +75,7 @@ SYSTEM_BIN = [ FFilterByBuildFeatures
 	pc
 	ping
 	pkgman
+	power
 	prio
 	profile
 	ps
@@ -351,6 +352,7 @@ SYSTEM_ADD_ONS_DRIVERS_POWER = [ FFilterByBuildFeatures
 		amd_thermal
 		pch_thermal
 	}@ # x86,x86_64
+	jh7110_thermal@riscv64
 ] ;
 
 SYSTEM_ADD_ONS_DRIVERS_SENSOR = [ FFilterByBuildFeatures
@@ -362,7 +364,7 @@ SYSTEM_ADD_ONS_BUS_MANAGERS = [ FFilterByBuildFeatures
 	acpi@x86,x86_64,arm64
 	agp_gart@x86,x86_64
 	ata
-	hyperv@x86,x86_64
+	hyperv@x86,x86_64,arm64
 	i2c@x86,x86_64
 	isa@x86,x86_64
 	mmc

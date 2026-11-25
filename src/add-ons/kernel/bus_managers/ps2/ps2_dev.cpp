@@ -102,6 +102,11 @@ ps2_dev_detect_pointing(ps2_dev* dev, device_hooks** hooks)
 		*hooks = &gSynapticsDeviceHooks;
 		goto dev_found;
 	}
+	if (status == B_BUSY) {
+		// A Synaptics InterTouch pad handed over to the RMI4 SMBus driver:
+		// probing on would make it a PS/2 mouse again.
+		return B_BUSY;
+	}
 
 	status = probe_alps(dev);
 	if (status == B_OK) {
@@ -350,6 +355,11 @@ ps2_dev_handle_int(ps2_dev* dev)
 
 pass_to_handler:
 
+	if (synaptics_handed_over(dev)) {
+		// the touchpad belongs to the RMI4 SMBus driver
+		return B_HANDLED_INTERRUPT;
+	}
+
 	if ((flags & PS2_FLAG_KEYB) == 0) {
 		if (dev->history[0].error && data == 0xfd) {
 			INFO("ps2: hot removal of %s\n", dev->name);
@@ -358,7 +368,7 @@ pass_to_handler:
 		}
 		if (data == 0x00 && dev->history[1].data == 0xaa
 			&& (dev->history[0].time - dev->history[1].time) < 50000
-			&& !synaptics_hot_plug_is_pt_payload(dev)) {
+			&& !synaptics_hot_plug_is_packet_data(dev)) {
 			INFO("ps2: hot plugin of %s\n", dev->name);
 			if (dev->active) {
 				INFO("ps2: device %s still active, republishing...\n",

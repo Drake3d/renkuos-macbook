@@ -1053,7 +1053,14 @@ View::Draw(DrawingEngine* drawingEngine, const BRegion* effectiveClipping,
 		return;
 	}
 
-	if (fViewBitmap != NULL || fViewColor != B_TRANSPARENT_COLOR) {
+	// In a transparent window, the window itself and the views without a
+	// view color start out clear, unless they let their parent draw behind
+	// them.
+	bool clear = fWindow != NULL && fWindow->IsTransparent()
+		&& (fParent == NULL || (fViewColor == B_TRANSPARENT_COLOR
+			&& (fFlags & B_TRANSPARENT_BACKGROUND) == 0));
+
+	if (fViewBitmap != NULL || fViewColor != B_TRANSPARENT_COLOR || clear) {
 		// we can only draw within our own area
 		BRegion* redraw;
 		if ((fFlags & B_DRAW_ON_CHILDREN) != 0) {
@@ -1103,7 +1110,7 @@ View::Draw(DrawingEngine* drawingEngine, const BRegion* effectiveClipping,
 				drawing_mode oldMode;
 				drawingEngine->SetDrawingMode(B_OP_COPY, oldMode);
 
-				if (fBitmapOptions & B_TILE_BITMAP) {
+				if ((fBitmapOptions & B_TILE_BITMAP) == B_TILE_BITMAP) {
 					// tile across entire view
 
 					float start = rect.left;
@@ -1117,7 +1124,7 @@ View::Draw(DrawingEngine* drawingEngine, const BRegion* effectiveClipping,
 					}
 					// nothing left to be drawn
 					redraw->MakeEmpty();
-				} else if (fBitmapOptions & B_TILE_BITMAP_X) {
+				} else if ((fBitmapOptions & B_TILE_BITMAP_X) != 0) {
 					// tile in x direction
 
 					while (rect.left < redraw->Frame().right) {
@@ -1129,7 +1136,7 @@ View::Draw(DrawingEngine* drawingEngine, const BRegion* effectiveClipping,
 					rect.left = redraw->Frame().left;
 					rect.right = redraw->Frame().right;
 					redraw->Exclude(rect);
-				} else if (fBitmapOptions & B_TILE_BITMAP_Y) {
+				} else if ((fBitmapOptions & B_TILE_BITMAP_Y) != 0) {
 					// tile in y direction
 
 					while (rect.top < redraw->Frame().bottom) {
@@ -1158,7 +1165,9 @@ View::Draw(DrawingEngine* drawingEngine, const BRegion* effectiveClipping,
 
 		}
 
-		if (fViewColor != B_TRANSPARENT_COLOR) {
+		if (clear && overlayCookie == NULL) {
+			drawingEngine->FillRegion(*redraw, (rgb_color){ 0, 0, 0, 0 });
+		} else if (fViewColor != B_TRANSPARENT_COLOR) {
 			// fill visible region with view color,
 			// this version of FillRegion ignores any
 			// clipping, that's why "redraw" needs to

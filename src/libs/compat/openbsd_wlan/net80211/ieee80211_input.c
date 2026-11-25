@@ -424,12 +424,28 @@ ieee80211_inputm(struct ifnet *ifp, struct mbuf *m, struct ieee80211_node *ni,
 		*orxseq = nrxseq;
 	}
 	if (ic->ic_state > IEEE80211_S_SCAN) {
+#ifdef __HAIKU__
+		/*
+		 * In STA mode every frame comes with ic_bss, also the beacons
+		 * of other APs during a background scan. Only those of our
+		 * AP tell its signal.
+		 */
+		int ownap = ic->ic_opmode != IEEE80211_M_STA ||
+		    IEEE80211_ADDR_EQ(wh->i_addr2, ni->ni_bssid);
+
+		if (ownap && rxi->rxi_rssi != 0)
+#else
 		/* Only update RSSI if driver provided a valid value. */
 		if (rxi->rxi_rssi != 0)
+#endif
 			ni->ni_rssi = rxi->rxi_rssi;
 		ni->ni_rstamp = rxi->rxi_tstamp;
 		ni->ni_inact = 0;
 
+#ifdef __HAIKU__
+		if (ownap && ic->ic_opmode == IEEE80211_M_STA)
+			ieee80211_roam_input(ic, ni, rxi->rxi_rssi);
+#endif
 		if (ic->ic_state == IEEE80211_S_RUN && ic->ic_bgscan_start) {
 			/* Cancel or start background scan based on RSSI. */
 			if ((*ic->ic_node_checkrssi)(ic, ni))
@@ -2758,6 +2774,13 @@ ieee80211_recv_deauth(struct ieee80211com *ic, struct mbuf *m,
 		    ic->ic_state == IEEE80211_S_RUN);
 		int stay_auth = ((ic->ic_userflags & IEEE80211_F_STAYAUTH) &&
 		    ic->ic_state >= IEEE80211_S_AUTH);
+#ifdef __HAIKU__
+		/* ignore deauth not sent from our BSS */
+		if (!IEEE80211_ADDR_EQ(wh->i_addr3, ic->ic_bss->ni_bssid)) {
+			ic->ic_stats.is_rx_wrongbss++;
+			break;
+		}
+#endif
 		if (!(bgscan || stay_auth))
 			ieee80211_new_state(ic, IEEE80211_S_AUTH,
 			    IEEE80211_FC0_SUBTYPE_DEAUTH);
@@ -2813,6 +2836,13 @@ ieee80211_recv_disassoc(struct ieee80211com *ic, struct mbuf *m,
 	case IEEE80211_M_STA: {
 		int bgscan = ((ic->ic_flags & IEEE80211_F_BGSCAN) &&
 		    ic->ic_state == IEEE80211_S_RUN);
+#ifdef __HAIKU__
+		/* ignore disassoc not sent from our BSS */
+		if (!IEEE80211_ADDR_EQ(wh->i_addr3, ic->ic_bss->ni_bssid)) {
+			ic->ic_stats.is_rx_wrongbss++;
+			break;
+		}
+#endif
 #ifdef __HAIKU__
 		/*
 		 * An AP that still holds our previous association ends it when

@@ -57,7 +57,11 @@ GICv3InterruptController::GICv3InterruptController(phys_addr_t gicd_phys_addr,
 
 	uint32_t typer = GICD_TYPER;
 	fMaxInt = static_cast<int32_t>((typer & 0x1f) + 1) * 32;
-	reserve_io_interrupt_vectors(fMaxInt, 0, INTERRUPT_TYPE_IRQ);
+	// SGIs and PPIs (0 - 31) belong to each CPU, as the generic timer does:
+	// they cannot be routed, so the scheduler must not try to move them, as
+	// on x86 the local APIC timer. Only the SPIs are I/O interrupts.
+	reserve_io_interrupt_vectors(32, 0, INTERRUPT_TYPE_LOCAL_IRQ);
+	reserve_io_interrupt_vectors(fMaxInt - 32, 32, INTERRUPT_TYPE_IRQ);
 
 	dprintf("GICv3 detected: rev %u, max interrupts %u, TYPER %#x\n", rev, fMaxInt, typer);
 	// disable the distributor
@@ -120,7 +124,7 @@ GICv3InterruptController::_SetEnable(uint vector, bool enable)
 {
 	auto mask = static_cast<uint32_t>(1ULL << (vector % 32));
 	if (vector < 32) {
-		const int32 cpu_id = smp_get_current_cpu();
+		const int32 cpu_id = fGicrIndex[smp_get_current_cpu()];
 		if (enable)
 			GICR_ISENABLER0(cpu_id) = mask;
 		else
@@ -143,7 +147,7 @@ GICv3InterruptController::_SetEnable(uint vector, bool enable)
 void
 GICv3InterruptController::_RedistributorSleep(bool sleep)
 {
-	int32 cpu_id = smp_get_current_cpu();
+	int32 cpu_id = fGicrIndex[smp_get_current_cpu()];
 	ASSERT(!are_interrupts_enabled());
 
 	// GICR_WAKER could be RW or RAZ/WI.  When GICD_CTLR.DS is 1, GICR_WAKER is
@@ -176,7 +180,28 @@ GICv3InterruptController::_RedistributorSleep(bool sleep)
 status_t
 GICv3InterruptController::PerCpuInit()
 {
-	int32 cpu_id = smp_get_current_cpu();
+	// Find this CPU's redistributor: GICR_TYPER[63:32] holds its affinity.
+	// Fall back to the CPU number if none matches.
+	const int32 cpu = smp_get_current_cpu();
+	const uint64 mpidr = READ_SPECIALREG(mpidr_el1);
+	const uint64 affinity = CPU_AFF3(mpidr) << 24 | CPU_AFF2(mpidr) << 16
+		| CPU_AFF1(mpidr) << 8 | CPU_AFF0(mpidr);
+	fGicrIndex[cpu] = -1;
+	for (uint32 i = 0; i < fNumCpus; i++) {
+		const uint64 typer = GICR_TYPER(i);
+		if ((typer >> 32) == affinity) {
+			fGicrIndex[cpu] = i;
+			break;
+		}
+		if ((typer & GICR_TYPER_LAST) != 0)
+			break;
+	}
+	if (fGicrIndex[cpu] < 0) {
+		dprintf("GICv3: no redistributor for cpu %" B_PRId32 " affinity %#" B_PRIx64
+			", using frame %" B_PRId32 "\n", cpu, affinity, cpu);
+		fGicrIndex[cpu] = cpu;
+	}
+	const int32 cpu_id = fGicrIndex[cpu];
 
 	// wake up the redistributor
 	_RedistributorSleep(false);

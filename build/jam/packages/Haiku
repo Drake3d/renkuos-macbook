@@ -47,24 +47,28 @@ AddFilesToPackage add-ons kernel busses ata :
 	;
 
 AddFilesToPackage add-ons kernel busses i2c :
+	i801_smbus@x86,x86_64
 	pch_i2c@x86,x86_64
 	;
 AddFilesToPackage add-ons kernel busses mmc :
+	designware_mmc@riscv64
 	sdhci
 	bcm2711_emmc2@arm64
 	;
 AddFilesToPackage add-ons kernel busses pci :
 	<pci>designware@riscv64
+	<pci>plda@riscv64
 	<pci>ecam@riscv64,arm,arm64
 	<pci>x86@x86,x86_64
 	;
 AddFilesToPackage add-ons kernel busses random :
 	ccp_rng@x86,x86_64
+	jh7110_trng@riscv64
 	virtio_rng
 	;
 AddFilesToPackage add-ons kernel busses scsi :
 	ahci
-	hyperv_scsi@x86,x86_64
+	hyperv_scsi@x86,x86_64,arm64
 	virtio_scsi
 	;
 AddFilesToPackage add-ons kernel busses usb :
@@ -95,6 +99,8 @@ AddFilesToPackage add-ons kernel generic :
 	ata_adapter
 	bios@x86,x86_64
 	dpc
+	dw_axi_dma@riscv64
+	jh7110_clock_reset@riscv64
 	mpu401
 	scsi_periph
 	smbios@x86,x86_64
@@ -114,6 +120,7 @@ AddFilesToPackage add-ons kernel interrupt_controllers :
 AddFilesToPackage add-ons kernel power cpufreq :
 	amd_pstates@x86,x86_64
 	intel_pstates@x86,x86_64
+	jh7110_cpufreq@riscv64
 	;
 AddFilesToPackage add-ons kernel power cpuidle :
 	x86_cstates@x86,x86_64
@@ -148,6 +155,7 @@ AddNewDriversToPackage gpio :
 	baytrail_gpio@x86,x86_64
 	;
 AddNewDriversToPackage graphics :
+	hyperv_video@x86,x86_64,arm64
 	virtio_gpu
 	;
 AddNewDriversToPackage power
@@ -156,25 +164,32 @@ AddNewDriversToPackage sensor
 	: $(SYSTEM_ADD_ONS_DRIVERS_SENSOR) ;
 AddNewDriversToPackage network :
 	brcmfmac@arm64
+	dwmac@riscv64
 	genet@arm64
+	hyperv_netvsc@x86,x86_64,arm64
 	usb_ecm
 	virtio_net
 	;
 AddNewDriversToPackage input :
-	hyperv_hid@x86,x86_64
-	i2c_elan
+	hyperv_hid@x86,x86_64,arm64
+	hyperv_kbd@x86,x86_64,arm64
+	i2c_elan@x86,x86_64,arm64
 	i2c_goodix@x86,x86_64
 	i2c_hid
+	rmi4_smbus@x86,x86_64
 	virtio_input
 	;
 AddNewDriversToPackage display :
 #	display_adapter@x86
 	;
 AddNewDriversToPackage audio hmulti :
+	intel_lpe@x86,x86_64
 #	virtio_sound
+	jh7110_i2stx@riscv64
+	jh7110_pwmdac@riscv64
 	;
 AddNewDriversToPackage hyperv :
-	hyperv_ic@x86,x86_64
+	hyperv_ic@x86,x86_64,arm64
 	;
 
 # legacy drivers
@@ -205,6 +220,7 @@ AddDriversToPackage dvb :
 AddDriversToPackage graphics
 	: $(SYSTEM_ADD_ONS_DRIVERS_GRAPHICS) ;
 AddDriversToPackage input :
+	bluetooth_hid
 	ps2_hid
 	usb_hid
 	wacom
@@ -356,12 +372,13 @@ AddBootModuleSymlinksToPackage
 	efi_gpt
 	generic_ide_pci
 	highpoint_ide_pci
-	hyperv@x86,x86_64
-	hyperv_scsi@x86,x86_64
+	hyperv@x86,x86_64,arm64
+	hyperv_scsi@x86,x86_64,arm64
 	ide_isa@x86
 	isa@x86,x86_64
 	intel
 	it8211
+	jh7110_clock_reset@riscv64
 	legacy_sata
 	mmc
 	mmc_disk
@@ -370,6 +387,7 @@ AddBootModuleSymlinksToPackage
 	packagefs
 	pci
 	<pci>designware@riscv64
+	<pci>plda@riscv64
 	<pci>ecam@riscv64,arm,arm64
 	<pci>x86@x86,x86_64
 	fdt@riscv64,arm,arm64
@@ -379,6 +397,7 @@ AddBootModuleSymlinksToPackage
 	scsi_periph
 	silicon_image_3112
 	smbios@x86,x86_64
+	designware_mmc@riscv64
 	sdhci
 	bcm2711_emmc2@arm64
 	usb
@@ -397,6 +416,8 @@ AddBootModuleSymlinksToPackage
 # add-ons
 AddFilesToPackage add-ons accelerants :
 	framebuffer.accelerant
+	vesa.accelerant@arm64
+		# hyperv_video uses it; x86 gets it from SYSTEM_ADD_ONS_ACCELERANTS
 	virtio_gpu.accelerant
 	$(SYSTEM_ADD_ONS_ACCELERANTS) ;
 AddFilesToPackage add-ons locale catalogs :

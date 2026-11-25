@@ -10,6 +10,7 @@
 #include <arch_acpi.h>
 #include <arch_smp.h>
 
+#include "aarch64.h"
 #include "serial.h"
 #include "acpi.h"
 
@@ -18,6 +19,7 @@
 
 
 void arm64_handle_acpi_fadt(acpi_fadt_arm_boot_arch armBootFlags);
+void arm64_smp_boot_cpu_only(uint64 mpidr);
 
 
 static void arch_acpi_get_uart_pl011(const uart_info &uart)
@@ -94,12 +96,25 @@ arch_handle_acpi()
 		arm64_handle_acpi_fadt(fadt->arm_boot_arch);
 	}
 
+	// The virtual timer is not always PPI 27: Hyper-V uses 20.
+	acpi_gtdt* gtdt = (acpi_gtdt*)acpi_find_table(ACPI_GTDT_SIGNATURE);
+	if (gtdt != NULL && gtdt->header.length >= sizeof(acpi_gtdt)) {
+		gKernelArgs.arch_args.timer_interrupt = gtdt->virtual_el1_gsiv;
+		dprintf("discovered virtual timer from acpi: interrupt=%u\n",
+			gKernelArgs.arch_args.timer_interrupt);
+	}
+
 	acpi_madt *madt = (acpi_madt*)acpi_find_table(ACPI_MADT_SIGNATURE);
 	if (madt != NULL) {
 		uint64 gicc_base = 0;
 		uint64 gicd_base = 0;
 		uint64 gicr_base = 0;
+		uint64 gicc_gicr_base = 0;
 		uint8 version = 0;
+		// The boot CPU's MPIDR as arm64_secondary_startup computes it
+		const uint64 bootMpidr = READ_SPECIALREG(MPIDR_EL1) & ~((1UL << 31) | (1UL << 24));
+		platform_cpu_info* cpus[SMP_MAX_CPUS];
+		uint32 cpuCount = 0;
 
 		acpi_apic *desc = (acpi_apic*)(madt + 1);
 		while (desc != (acpi_apic*)((char*)madt + madt->header.length)) {
@@ -107,6 +122,15 @@ arch_handle_acpi()
 				acpi_gic_interface *acpi_gicc = (acpi_gic_interface*)desc;
 				if (acpi_gicc->cpu_interface_num == 0)
 					gicc_base = acpi_gicc->base_address;
+				if (desc->length >= offsetof(acpi_gic_interface, gicr_address) + sizeof(uint64)
+					&& acpi_gicc->gicr_address != 0
+					&& (gicc_gicr_base == 0 || acpi_gicc->gicr_address < gicc_gicr_base))
+					gicc_gicr_base = acpi_gicc->gicr_address;
+
+				if ((acpi_gicc->flags & ACPI_GICC_ENABLED) == 0) {
+					desc = (acpi_apic*)((char*)desc + desc->length);
+					continue;
+				}
 
 				platform_cpu_info* cpu = NULL;
 				arch_smp_register_cpu(&cpu);
@@ -114,6 +138,7 @@ arch_handle_acpi()
 					break;
 				cpu->id = acpi_gicc->cpu_interface_num;
 				cpu->mpidr = acpi_gicc->mpidr;
+				cpus[cpuCount++] = cpu;
 			} else if (desc->type == ACPI_MADT_GIC_DISTRIBUTOR) {
 				acpi_gic_distributor *acpi_gicd = (acpi_gic_distributor*)desc;
 				gicd_base = acpi_gicd->base_address;
@@ -125,6 +150,11 @@ arch_handle_acpi()
 			desc = (acpi_apic*)((char*)desc + desc->length);
 		}
 
+		// ACPI allows the GICR base per GICC instead of a GICR structure (Hyper-V does this)
+		// The redistributor frames are assumed contiguous from the lowest one.
+		if (gicr_base == 0)
+			gicr_base = gicc_gicr_base;
+
 		intc_info& intc = gKernelArgs.arch_args.interrupt_controller;
 		if (version == 0) {
 			// ACPI allows firmware to report 0 ("discover from hardware"),
@@ -135,6 +165,26 @@ arch_handle_acpi()
 			else if (gicc_base != 0)
 				version = GICV2;
 			dprintf("gic version not reported in acpi, assuming %d\n", version);
+		}
+		if (version != GICV2) {
+			// The CPU interface number is for GICv2 only (Hyper-V's GICv3
+			// GICCs all say 0); number the CPUs in MADT order instead, as
+			// the device tree path does, with the boot CPU as 0.
+			const uint64 affinityMask = 0xff00ffffffUL;
+			bool bootCpuFound = false;
+			uint32 secondaryCpus = 0;
+			for (uint32 i = 0; i < cpuCount; i++) {
+				if (!bootCpuFound
+					&& (cpus[i]->mpidr & affinityMask) == (bootMpidr & affinityMask)) {
+					cpus[i]->id = 0;
+					bootCpuFound = true;
+				} else
+					cpus[i]->id = ++secondaryCpus;
+			}
+			if (!bootCpuFound) {
+				dprintf("boot cpu mpidr %lx not in acpi madt, using it alone\n", bootMpidr);
+				arm64_smp_boot_cpu_only(bootMpidr);
+			}
 		}
 		if (version == GICV2 && gicc_base != 0 && gicd_base != 0) {
 			strcpy(intc.kind, INTC_KIND_GICV2);

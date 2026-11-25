@@ -18,6 +18,15 @@ under an appropriate licence and that you have the right to submit it.
 clearly-labelled commit rather than quietly editing the import. That keeps the diff against
 upstream honest and the fix attributable.
 
+**Interfaces we keep stable.** RenkuOS promises add-on authors that some classes don't change
+the way upstream may change them. An upstream commit that touches one of these is reworked
+before it's imported, never cherry-picked verbatim, and the rework is named in its row:
+
+- `headers/os/interface/ControlLook.h`: `BControlLook` only changes through its reserved virtual
+  slots (`_ReservedControlLook6`–`10`) and `_reserved`. Virtual methods are never added in the
+  middle, reordered or removed, and members are never added. Control looks built once against
+  it depend on this.
+
 | Date | Upstream commit | Subject | Why |
 |---|---|---|---|
 | 2026-09-16 | `fcdee3a787` | deskbar: don't loop forever if replicant is larger than the row itself | Fixes a Deskbar hang (#19394): a replicant wider than the tray made the placement loop spin at 100% CPU, so Deskbar never appeared |
@@ -32,6 +41,9 @@ upstream honest and the fix attributable.
 
 ## Declined
 
-Nothing yet. When an upstream commit is looked at and rejected, record it here with the reason
-— that record is what makes "we did not just run away" a checkable claim rather than a
-sentiment.
+When an upstream commit is looked at and rejected, record it here with the reason — that record
+is what makes "we did not just run away" a checkable claim rather than a sentiment.
+
+| Date | Upstream commit | Subject | Why not |
+|---|---|---|---|
+| 2026-11-08 | `8564207c29` | nvme_disk: add support for B_GET_DEVICE_NAME and B_GET_DEVICE_SERIAL_NUMBER | It copies the raw Identify Controller fields, which are padded with spaces and have no terminator. Names and serial numbers come back with trailing spaces, a 40-character model or 20-character serial loses its last character, and `user_strlcpy()` reads past the field looking for the end. Replaced by our own version in `nvme_disk.cpp`, which returns the trimmed strings libnvme already makes. `B_GET_DEVICE_SERIAL_NUMBER` keeps upstream's name, value, and line in `Drivers.h` |

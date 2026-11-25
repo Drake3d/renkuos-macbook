@@ -30,5 +30,6 @@ KernelAddon apple_spi :
 	JoystickProtocolHandler.cpp
 	KeyboardProtocolHandler.cpp
 	MouseProtocolHandler.cpp
+	MouseReportDecoder.cpp
 	TabletProtocolHandler.cpp
 ;

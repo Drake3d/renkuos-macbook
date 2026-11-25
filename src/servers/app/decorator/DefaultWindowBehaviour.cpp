@@ -24,6 +24,7 @@
 
 #include "AppServer.h"
 #include "ClickTarget.h"
+#include "Compositor.h"
 #include "Desktop.h"
 #include "DefaultDecorator.h"
 #include "DrawingEngine.h"
@@ -40,6 +41,10 @@
 
 // The span between mouse down
 static const bigtime_t kWindowActivationTimeout = 500000LL;
+
+// How much of a window that is being dragged covers what is behind it, when
+// the compositor makes it see-through
+static const uint8 kDraggedWindowAlpha = 192;
 
 
 // #pragma mark - State
@@ -215,8 +220,20 @@ struct DefaultWindowBehaviour::DragState : MouseTrackingState {
 		bool activateOnMouseUp, bool minimizeCheckOnMouseUp)
 		:
 		MouseTrackingState(behavior, where, activateOnMouseUp,
-			minimizeCheckOnMouseUp)
+			minimizeCheckOnMouseUp),
+		fSeeThrough(false),
+		fWobbling(false)
 	{
+	}
+
+	virtual void ExitState(State* nextState)
+	{
+		if (fSeeThrough)
+			fWindow->SetCompositeAlpha(255);
+		if (fWobbling) {
+			if (Compositor* compositor = fDesktop->GetCompositor())
+				compositor->ReleaseWobble(fWindow);
+		}
 	}
 
 	virtual bool MouseDown(BMessage* message, BPoint where, bool& _unhandled)
@@ -244,9 +261,34 @@ struct DefaultWindowBehaviour::DragState : MouseTrackingState {
 
 			// constrain delta to true change in position
 			delta = fWindow->Frame().LeftTop() - oldLeftTop;
+
+			// Only once the window really moves, as a click on the tab also
+			// starts a drag.
+			if (!fSeeThrough && delta != BPoint(0, 0)
+				&& fDesktop->GetCompositor() != NULL
+				&& DesktopSettings(fDesktop).CompositedDragTransparency()) {
+				fSeeThrough = true;
+				fWindow->SetCompositeAlpha(kDraggedWindowAlpha);
+			}
+
+			// The window wobbles round the point it was grabbed by.
+			if (!fWobbling && delta != BPoint(0, 0)) {
+				Compositor* compositor = fDesktop->GetCompositor();
+				DesktopSettings settings(fDesktop);
+				if (compositor != NULL && settings.CompositedWobblyWindows()) {
+					fWobbling = true;
+					compositor->StartWobble(fWindow,
+						fLastMousePosition + delta - fWindow->Frame().LeftTop(),
+						settings.CompositedWobbliness());
+				}
+			}
 		} else
 			delta = BPoint(0, 0);
 	}
+
+private:
+	bool	fSeeThrough;
+	bool	fWobbling;
 };
 
 
@@ -547,8 +589,18 @@ struct DefaultWindowBehaviour::DecoratorButtonState : State {
 
 				case Decorator::REGION_ZOOM_BUTTON:
 					decorator->SetZoom(fTab, false);
-					if (fBehavior._RegionFor(message, tab) == fButton)
+					if (fBehavior._RegionFor(message, tab) == fButton) {
+						// The window wobbles into the frame the application
+						// zooms it to.
+						Compositor* compositor = fDesktop->GetCompositor();
+						DesktopSettings settings(fDesktop);
+						if (compositor != NULL
+							&& settings.CompositedWobblyWindows()) {
+							compositor->StartZoomWobble(fWindow,
+								settings.CompositedWobbliness());
+						}
 						fWindow->ServerWindow()->NotifyZoom();
+					}
 					break;
 
 				case Decorator::REGION_MINIMIZE_BUTTON:

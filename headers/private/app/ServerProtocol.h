@@ -368,7 +368,35 @@ enum {
 	AS_VIEW_CLIP_TO_RECT,
 	AS_VIEW_CLIP_TO_SHAPE,
 
+	// Composited desktop, applies from the next start of app_server
+	AS_SET_COMPOSITED_DESKTOP,
+	AS_GET_COMPOSITED_DESKTOP,
+
+	// What the compositor adds to windows, applies right away
+	AS_SET_COMPOSITED_SHADOWS,
+	AS_GET_COMPOSITED_SHADOWS,
+	AS_SET_COMPOSITED_ROUNDED_CORNERS,
+	AS_GET_COMPOSITED_ROUNDED_CORNERS,
+	AS_SET_COMPOSITED_DRAG_TRANSPARENCY,
+	AS_GET_COMPOSITED_DRAG_TRANSPARENCY,
+
+	// Whether the desktop is composited right now
+	AS_IS_DESKTOP_COMPOSITED,
+	AS_SET_COMPOSITED_WOBBLY_WINDOWS,
+	AS_GET_COMPOSITED_WOBBLY_WINDOWS,
+	AS_SET_COMPOSITED_WOBBLINESS,
+	AS_GET_COMPOSITED_WOBBLINESS,
+
 	AS_LAST_CODE
+};
+
+// RenkuOS: screen observer codes. They have fixed values outside the
+// sequential range above, so that a client can try them on any app_server.
+// One that does not know them replies B_ERROR.
+enum {
+	AS_SCREEN_OBSERVER_START	= 'RSos',
+	AS_SCREEN_OBSERVER_STOP		= 'RSoe',
+	AS_SCREEN_OBSERVER_READ		= 'RSor',
 };
 
 // bitmap allocation flags

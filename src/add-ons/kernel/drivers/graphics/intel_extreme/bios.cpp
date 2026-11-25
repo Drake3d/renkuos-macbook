@@ -224,6 +224,8 @@ struct lfp_brightness_level {
 
 
 struct bdb_lfp_backlight_data {
+	uint8 id;
+	uint16 size;
 	uint8 entry_size;
 	struct bdb_lfp_backlight_data_entry data[16];
 	uint8 level [16]; // Only for versions < 234
@@ -543,7 +545,7 @@ parse_vbt_from_bios(struct intel_shared_info* info)
 						min_c(sizeof(child_device_config), childDeviceSize));
 					TRACE((DEVICE_NAME ": found child device type: 0x%x\n", config->device_type));
 					info->device_config_count++;
-					if (info->device_config_count > 10)
+					if (info->device_config_count >= B_COUNT_OF(info->device_configs))
 						break;
 				}
 				break;
@@ -659,6 +661,12 @@ parse_vbt_from_bios(struct intel_shared_info* info)
 
 				bdb_lfp_backlight_data* backlightData
 					= (bdb_lfp_backlight_data*)(vbios.memory + start);
+				if (backlightData->entry_size
+						!= sizeof(bdb_lfp_backlight_data_entry)) {
+					TRACE((DEVICE_NAME ": unsupported backlight entry size %u\n",
+						backlightData->entry_size));
+					break;
+				}
 
 				const struct bdb_lfp_backlight_data_entry* entry = &backlightData->data[panelType];
 

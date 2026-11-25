@@ -30,6 +30,7 @@ Job::Job(const char* name)
 	fLaunching(false),
 	fInitStatus(B_NO_INIT),
 	fTeam(-1),
+	fLastLaunchTime(0),
 	fDefaultPort(-1),
 	fToken((uint32)B_PREFERRED_TOKEN),
 	fLaunchStatus(B_NO_INIT),
@@ -50,6 +51,7 @@ Job::Job(const Job& other)
 	fLaunching(other.IsLaunching()),
 	fInitStatus(B_NO_INIT),
 	fTeam(-1),
+	fLastLaunchTime(0),
 	fDefaultPort(-1),
 	fToken((uint32)B_PREFERRED_TOKEN),
 	fLaunchStatus(B_NO_INIT),
@@ -306,6 +308,13 @@ Job::Team() const
 }
 
 
+bigtime_t
+Job::LastLaunchTime() const
+{
+	return fLastLaunchTime;
+}
+
+
 const PortMap&
 Job::Ports() const
 {
@@ -351,6 +360,8 @@ Job::SetDefaultPort(port_id port)
 status_t
 Job::Launch()
 {
+	fLastLaunchTime = system_time();
+
 	// Build environment
 
 	std::vector<const char*> environment;
@@ -495,9 +506,15 @@ Job::Run()
 {
 	status_t status = BJob::Run();
 
-	// Jobs can be relaunched at any time
-	if (!IsService())
+	// Jobs can be relaunched at any time, and so can a service that isn't
+	// running: one that failed to start, as when it was already running
+	// from another launch, would otherwise be refused from then on.
+	if (!IsService() || !IsRunning())
 		SetState(B_JOB_STATE_WAITING_TO_RUN);
+
+	// BJob::Run() refuses without calling Execute(), which clears this; left
+	// set, the job would count as launching forever.
+	fLaunching = false;
 
 	return status;
 }

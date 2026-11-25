@@ -1490,6 +1490,15 @@ common_setrlimit(int resource, const struct rlimit * rlp)
 		case RLIMIT_NOVMON:
 			return vfs_setrlimit(resource, rlp);
 
+		case RLIMIT_CORE:
+			// Core files are controlled by debug_server, so the limit is
+			// always 0/0 (see common_getrlimit()). Programs that turn core
+			// files off (ssh, crash handlers, "ulimit -c 0") check the result,
+			// so accept a request for the limit that is already in effect.
+			if (rlp->rlim_cur == 0 && rlp->rlim_max == 0)
+				return B_OK;
+			return EINVAL;
+
 		default:
 			return EINVAL;
 	}
@@ -3982,7 +3991,15 @@ _user_block_thread(uint32 flags, bigtime_t timeout)
 		return B_BAD_ADDRESS;
 	}
 	if (oldStatus > 0) {
-		if (user_memcpy(&thread->user_thread->wait_status, &status,
+		// An interruption leaves the wait armed. The syscall is restarted
+		// after a signal that is ignored or has SA_RESTART, and callers retry
+		// on B_INTERRUPTED: with B_INTERRUPTED stored here, the next call
+		// returned at once, over and over, and user_unblock_thread() dropped
+		// the real wake-up because the status was no longer positive. A
+		// thread waiting on a libroot rw_lock that received a SIGCHLD spun
+		// at full CPU forever (a Deskbar menu window, holding up the menu).
+		if (status != B_INTERRUPTED
+			&& user_memcpy(&thread->user_thread->wait_status, &status,
 				sizeof(status)) < B_OK) {
 			return B_BAD_ADDRESS;
 		}

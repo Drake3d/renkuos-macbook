@@ -14,6 +14,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <Autolock.h>
 #include <vesa/vesa_info.h>
 
 #include "drawing_support.h"
@@ -43,6 +44,7 @@ HWInterface::HWInterface()
 	:
 	MultiLocker("hw interface lock"),
 	fFloatingOverlaysLock("floating overlays lock"),
+	fFramePending(false),
 	fCursor(NULL),
 	fDragBitmap(NULL),
 	fDragBitmapOffset(0, 0),
@@ -52,7 +54,10 @@ HWInterface::HWInterface()
 	fHardwareCursorEnabled(false),
 	fCursorLocation(0, 0),
 	fVGADevice(-1),
-	fListeners(20)
+	fListeners(20),
+	fScreenObserverLock("screen observer lock"),
+	fScreenObserverCount(0),
+	fCursorGeneration(0)
 {
 }
 
@@ -255,7 +260,12 @@ HWInterface::MoveCursorTo(float x, float y)
 
 		IntRect oldFrame = _CursorFrame();
 		fCursorLocation = p;
-		if (fCursorVisible) {
+		if (fCursorVisible && fFramePending) {
+			// The drawing buffer is a frame ahead of the screen: what is
+			// under the cursor would come from it.
+			fPendingCursorDamage.Include((clipping_rect)oldFrame);
+			fPendingCursorDamage.Include((clipping_rect)_CursorFrame());
+		} else if (fCursorVisible) {
 			// Invalidate and _DrawCursor would not draw
 			// anything if the cursor is hidden
 			// (invalid cursor frame), but explicitly
@@ -336,8 +346,52 @@ HWInterface::InvalidateRegion(const BRegion& region)
 /*! The object needs to be already locked!
 */
 status_t
+HWInterface::PresentRegion(const BRegion& region)
+{
+	BAutolock _(fFloatingOverlaysLock);
+	BRegion update(region);
+	_TakeCursorDamage(update);
+	return InvalidateRegion(update);
+}
+
+
+void
+HWInterface::SetFramePending()
+{
+	BAutolock _(fFloatingOverlaysLock);
+	fFramePending = true;
+}
+
+
+/*!	Only while an application has the screen, which draws over the cursor
+	anyway: it is drawn again as the screen is given back.
+*/
+void
+HWInterface::CancelPendingFrame()
+{
+	BAutolock _(fFloatingOverlaysLock);
+	fFramePending = false;
+	fPendingCursorDamage.MakeEmpty();
+}
+
+
+void
+HWInterface::_TakeCursorDamage(BRegion& update)
+{
+	update.Include(&fPendingCursorDamage);
+	fPendingCursorDamage.MakeEmpty();
+	fFramePending = false;
+}
+
+
+/*! The object needs to be already locked!
+*/
+status_t
 HWInterface::Invalidate(const BRect& frame)
 {
+	if (atomic_get(&fScreenObserverCount) > 0)
+		_ScreenChanged(frame);
+
 	if (IsDoubleBuffered())
 		return CopyBackToFront(frame);
 
@@ -908,6 +962,8 @@ HWInterface::_RestoreCursorArea() const
 void
 HWInterface::_AdoptDragBitmap()
 {
+	atomic_add(&fCursorGeneration, 1);
+
 	// TODO: support other colorspaces/convert bitmap
 	if (fDragBitmap && !(fDragBitmap->ColorSpace() == B_RGB32
 		|| fDragBitmap->ColorSpace() == B_RGBA32)) {
@@ -1070,6 +1126,8 @@ HWInterface::_AdoptDragBitmap()
 void
 HWInterface::_NotifyFrameBufferChanged()
 {
+	_WholeScreenChanged();
+
 	BList listeners(fListeners);
 	int32 count = listeners.CountItems();
 	for (int32 i = 0; i < count; i++) {
@@ -1104,3 +1162,72 @@ HWInterface::_IsValidMode(const display_mode& mode)
 	return true;
 }
 
+
+// #pragma mark - screen observers (RenkuOS)
+
+
+bool
+HWInterface::AddScreenObserver(ScreenObserver* observer)
+{
+	BAutolock _(fScreenObserverLock);
+	observer->IncludeAll();
+	if (!fScreenObservers.AddItem(observer))
+		return false;
+	atomic_add(&fScreenObserverCount, 1);
+	return true;
+}
+
+
+void
+HWInterface::RemoveScreenObserver(ScreenObserver* observer)
+{
+	BAutolock _(fScreenObserverLock);
+	if (fScreenObservers.RemoveItem(observer))
+		atomic_add(&fScreenObserverCount, -1);
+}
+
+
+void
+HWInterface::TakeScreenChanges(ScreenObserver* observer, BRegion& region,
+	bool& all)
+{
+	BAutolock _(fScreenObserverLock);
+	all = observer->fAll;
+	if (all)
+		region.MakeEmpty();
+	else
+		region = observer->fDirty;
+	observer->fAll = false;
+	observer->fDirty.MakeEmpty();
+}
+
+
+void
+HWInterface::IncludeAllScreenChanges(ScreenObserver* observer)
+{
+	BAutolock _(fScreenObserverLock);
+	observer->IncludeAll();
+}
+
+
+/*!	Called from Invalidate(), which runs with the interface locked, often
+	only for parallel access by several threads at once.
+*/
+void
+HWInterface::_ScreenChanged(const BRect& frame)
+{
+	BAutolock _(fScreenObserverLock);
+	int32 count = fScreenObservers.CountItems();
+	for (int32 i = 0; i < count; i++)
+		((ScreenObserver*)fScreenObservers.ItemAtFast(i))->Include(frame);
+}
+
+
+void
+HWInterface::_WholeScreenChanged()
+{
+	BAutolock _(fScreenObserverLock);
+	int32 count = fScreenObservers.CountItems();
+	for (int32 i = 0; i < count; i++)
+		((ScreenObserver*)fScreenObservers.ItemAtFast(i))->IncludeAll();
+}

@@ -36,6 +36,13 @@ struct gpu_state {
 	uint32 d2crtcControl;
 };
 
+// Evergreen+ supports up to 6 CRTCs and uses different register addresses
+struct evergreen_gpu_state {
+	uint32 vgaRenderControl;
+	uint32 vgaHdpControl;
+	bool crtcEnabled[6];
+};
+
 
 struct fb_info {
 	bool		valid;
@@ -80,6 +87,10 @@ struct accelerant_info {
 	uint32			lvdsSpreadSpectrumID;
 
 	RingQueue*		ringQueue[RADEON_QUEUE_MAX]; // Ring buffer command processor
+
+	sem_id			retraceSemaphore;
+	thread_id		retraceThread;
+	volatile bool	retraceQuit;
 };
 
 

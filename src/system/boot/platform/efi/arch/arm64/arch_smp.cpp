@@ -38,7 +38,7 @@ extern "C" {
 
 extern "C" void arch_enter_kernel(struct kernel_args* kernelArgs,
 	addr_t kernelEntry, addr_t kernelStackTop, uint32 cpu);
-void arm64_common_cpu_startup();
+void arm64_common_cpu_startup(uint32 cpu);
 
 static void arm64_psci_call_smc(uint64 func, uint64 arg0, uint64 arg1, uint64 arg2);
 static void arm64_psci_call_hvc(uint64 func, uint64 arg0, uint64 arg1, uint64 arg2);
@@ -159,7 +159,7 @@ arm64_secondary_startup()
 extern "C" void
 arm64_secondary_startup2(uint32 cpu)
 {
-	arm64_common_cpu_startup();
+	arm64_common_cpu_startup(cpu);
 
 	arch_enter_kernel(sKernelArgs, sKernelEntry,
 		gKernelArgs.cpu_kstack[cpu].start + gKernelArgs.cpu_kstack[cpu].size,
@@ -185,7 +185,14 @@ arch_smp_boot_other_cpus(addr_t ttbr1, uint64 kernelEntry, addr_t virtKernelArgs
 			break;
 		case CpuEnableMethod::SpinTable:
 			*((uint64*)cpu->releaseAddr) = (uint64)arm64_secondary_startup;
-			asm("sev");
+			// The secondary CPUs have to read from RAM because their caches are disabled.
+			// Clean the cache line holding the release address before waking them.
+			asm volatile(
+				"dc cvac, %0\n"
+				"dsb sy\n"
+				"sev\n"
+				:: "r" (cpu->releaseAddr) : "memory"
+			);
 			break;
 		default:
 			// Unreachable, we set sCpuCount to 0 already
@@ -268,6 +275,16 @@ arm64_handle_acpi_fadt(acpi_fadt_arm_boot_arch armBootFlags)
 	else
 		sPsciCallFn = arm64_psci_call_smc;
 	gKernelArgs.arch_args.psci_conduit = armBootFlags.psci_use_hvc ? 2 : 1;
+}
+
+
+void
+arm64_smp_boot_cpu_only(uint64 mpidr)
+{
+	// The CPU list does not describe the boot CPU: run on it alone
+	sCpus[0].id = 0;
+	sCpus[0].mpidr = mpidr;
+	sCpuCount = 1;
 }
 
 

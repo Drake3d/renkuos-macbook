@@ -81,6 +81,11 @@ class SdhciBus {
 			status_t			ReadData(uint8_t command, uint32_t argument,
 									void* buffer, size_t length);
 			status_t			SetTiming(int timing, uint32 flags);
+			status_t			TransferIO(uint32 argument, bool isWrite,
+									void* buffer, uint32 blockCount,
+									uint32 blockSize);
+			void				SetCardInterrupt(void (*handler)(void*),
+									void* cookie);
 
 	private:
 			bool				PowerOn();
@@ -127,9 +132,9 @@ class SdhciBus {
 			thread_id			fWorkerThread;
 			card_type			fCardType;
 
-			// Page 0 holds the ADMA2 descriptor table, page 1 is a bounce
-			// buffer for the self test and for ReadData(). Both are
-			// physically contiguous and below 4GB.
+			// Page 0 holds the ADMA2 descriptor table, the rest is a bounce
+			// buffer for the self test, for ReadData() and for SDIO
+			// transfers. Both are physically contiguous and below 4GB.
 			area_id				fDmaArea;
 			adma2_descriptor*	fDmaDescriptors;
 			phys_addr_t			fDmaDescriptorsPhysical;
@@ -139,6 +144,8 @@ class SdhciBus {
 			// Transfer strategy, decided once on the first data access
 			bool				fTransferModeSelected;
 			int					fDataMode;
+			bool				fSdioAdmaFailed;
+			uint32				fLastAdmaError;
 			int					fStopMode;
 			uint8*				fReference;
 				// First two blocks of the device as read by the self test,
@@ -152,6 +159,11 @@ class SdhciBus {
 			// RCA of the selected card, remembered from CMD7, needed for
 			// CMD13 (SEND_STATUS) in error recovery
 			uint16				fSelectedRca;
+
+			// SDIO card interrupt
+			void				(*fCardInterruptHandler)(void*);
+			void*				fCardInterruptCookie;
+			spinlock			fCardInterruptLock;
 };
 
 
@@ -651,6 +663,10 @@ void terminate_bus(void* controller);
 status_t read_data(void* controller, uint8_t command, uint32_t argument,
 	void* buffer, size_t length);
 status_t set_timing(void* controller, int timing, uint32_t flags);
+status_t transfer_io(void* controller, uint32_t argument, bool isWrite,
+	void* buffer, uint32_t blockCount, uint32_t blockSize);
+void set_card_interrupt(void* controller, void (*handler)(void*),
+	void* cookie);
 
 extern mmc_bus_interface gSDHCIACPIDeviceModule;
 extern mmc_bus_interface gSDHCIPCIDeviceModule;

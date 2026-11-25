@@ -19,17 +19,59 @@
 #include <Path.h>
 #include <Rect.h>
 
+#include <new>
+#include <string.h>
+#include <strings.h>
+#include <sys/stat.h>
 #include <syslog.h>
+
+#include <safemode_defs.h>
+#include <syscalls.h>
 
 #include "AppServer.h"
 #include "Desktop.h"
 #include "DesktopSettings.h"
 #include "ServerConfig.h"
 #include "SATDecorator.h"
+#include "StyleDecorator.h"
 #include "Window.h"
 
 typedef float get_version(void);
 typedef DecorAddOn* create_decor_addon(image_id id, const char* name);
+
+
+/*!	Whether safe mode's "Disable user add-ons" is on, so that only the
+	system's own decorators may be loaded.
+*/
+static bool
+user_add_ons_disabled()
+{
+	char parameter[32];
+	size_t parameterLength = sizeof(parameter);
+	if (_kern_get_safemode_option(B_SAFEMODE_DISABLE_USER_ADD_ONS, parameter,
+			&parameterLength) != B_OK) {
+		return false;
+	}
+
+	return !strcasecmp(parameter, "enabled") || !strcasecmp(parameter, "on")
+		|| !strcasecmp(parameter, "true") || !strcasecmp(parameter, "yes")
+		|| !strcasecmp(parameter, "enable") || !strcmp(parameter, "1");
+}
+
+
+//!	Whether \a path is in the system's add-ons folder.
+static bool
+is_system_add_on(const char* path)
+{
+	BPath systemPath;
+	if (find_directory(B_SYSTEM_ADDONS_DIRECTORY, &systemPath) != B_OK)
+		return false;
+
+	const size_t length = strlen(systemPath.Path());
+	return strncmp(path, systemPath.Path(), length) == 0
+		&& path[length] == '/';
+}
+
 
 // Globals
 DecorManager gDecorManager;
@@ -113,7 +155,8 @@ DecorManager::DecorManager()
 	fCurrentDecor(&fDefaultDecor),
 	fPreviewDecor(NULL),
 	fPreviewWindow(NULL),
-	fCurrentDecorPath("Default")
+	fCurrentDecorPath("Default"),
+	fGeneration(0)
 {
 	_LoadSettingsFromDisk();
 }
@@ -172,10 +215,7 @@ DecorManager::CleanupForWindow(Window* window)
 	// Given window is being deleted, do any cleanup needed
 	if (fPreviewWindow == window && window != NULL){
 		fPreviewWindow = NULL;
-
-		if (fPreviewDecor != NULL)
-			unload_add_on(fPreviewDecor->ImageID());
-
+		// the add-on stays loaded, as all of them do (see _LoadDecor())
 		fPreviewDecor = NULL;
 	}
 }
@@ -194,8 +234,6 @@ DecorManager::PreviewDecorator(BString path, Window* window)
 	if (window == NULL)
 		return B_BAD_VALUE;
 
-	// We have to jump some hoops because the window must be able to
-	// delete its decorator before we unload the add-on
 	status_t error = B_OK;
 	DecorAddOn* decorPtr = _LoadDecor(path, error);
 	if (decorPtr == NULL)
@@ -204,7 +242,6 @@ DecorManager::PreviewDecorator(BString path, Window* window)
 	BRegion border;
 	window->GetBorderRegion(&border);
 
-	DecorAddOn* oldDecor = fPreviewDecor;
 	fPreviewDecor = decorPtr;
 	fPreviewWindow = window;
 	// After this call, the window has deleted its decorator.
@@ -215,9 +252,6 @@ DecorManager::PreviewDecorator(BString path, Window* window)
 
 	border.Include(&newBorder);
 	window->Desktop()->RebuildAndRedrawAfterWindowChange(window, border);
-
-	if (oldDecor != NULL)
-		unload_add_on(oldDecor->ImageID());
 
 	return B_OK;
 }
@@ -248,15 +282,15 @@ DecorManager::SetDecorator(BString path, Desktop* desktop)
 	DecorAddOn* oldDecor = fCurrentDecor;
 
 	BString oldPath = fCurrentDecorPath;
-	image_id oldImage = fCurrentDecor->ImageID();
 
 	fCurrentDecor = newDecor;
 	fCurrentDecorPath = path.String();
+	atomic_add((int32*)&fGeneration, 1);
 
 	if (desktop->ReloadDecor(oldDecor)) {
-		// now safe to unload all old decorator data
-		// saves us from deleting oldDecor...
-		unload_add_on(oldImage);
+		// The old add-on stays loaded: a window that was being made, not
+		// yet among the desktop's windows, may still be drawn by it until
+		// it is added and given the new one.
 		_SaveSettingsToDisk();
 		return B_OK;
 	}
@@ -269,6 +303,7 @@ DecorManager::SetDecorator(BString path, Desktop* desktop)
 
 	fCurrentDecor = oldDecor;
 	fCurrentDecorPath = oldPath;
+	atomic_add((int32*)&fGeneration, 1);
 	return B_ERROR;
 }
 
@@ -288,30 +323,71 @@ DecorManager::_LoadDecor(BString _path, status_t& error )
 	}
 
 	BPath path(&entry);
+	if (user_add_ons_disabled() && !is_system_add_on(path.Path())) {
+		// a decorator can keep app_server from starting
+		syslog(LOG_NOTICE, "app_server: safe mode: not loading decorator "
+			"\"%s\"\n", path.Path());
+		error = B_NOT_ALLOWED;
+		return NULL;
+	}
+
+	// Loaded before, and the file hasn't changed since. Add-ons are never
+	// unloaded: a window that was being made while the decorator changed may
+	// still be drawn by the old one until it's added to the desktop.
+	const BString key = _LoadedKey(_path);
+	std::map<BString, DecorAddOn*>::iterator loaded = fLoaded.find(key);
+	if (!key.IsEmpty() && loaded != fLoaded.end()) {
+		error = B_OK;
+		return loaded->second;
+	}
+
 	image_id image = load_add_on(path.Path());
 	if (image < 0) {
 		error = B_BAD_IMAGE_ID;
 		return NULL;
 	}
 
-	create_decor_addon*	createFunc;
-	if (get_image_symbol(image, "instantiate_decor_addon", B_SYMBOL_TYPE_TEXT,
-			(void**)&createFunc) != B_OK) {
-		unload_add_on(image);
-		error = B_MISSING_SYMBOL;
-		return NULL;
-	}
-
 	char name[B_FILE_NAME_LENGTH];
 	entry.GetName(name);
-	DecorAddOn* newDecor = createFunc(image, name);
+
+	DecorAddOn* newDecor;
+	create_decor_addon*	createFunc;
+	if (get_image_symbol(image, "instantiate_decor_addon", B_SYMBOL_TYPE_TEXT,
+			(void**)&createFunc) == B_OK) {
+		newDecor = createFunc(image, name);
+	} else {
+		// a style, which app_server's own engine draws through
+		const decor_style* style = StyleDecorAddOn::StyleOf(image);
+		if (style == NULL) {
+			unload_add_on(image);
+			error = B_MISSING_SYMBOL;
+			return NULL;
+		}
+		newDecor = new(std::nothrow) StyleDecorAddOn(image, name, style);
+	}
 	if (newDecor == NULL || newDecor->InitCheck() != B_OK) {
 		unload_add_on(image);
 		error = B_ERROR;
 		return NULL;
 	}
 
+	if (!key.IsEmpty())
+		fLoaded[key] = newDecor;
 	return newDecor;
+}
+
+
+//!	The add-on at \a path, as the file is now: its node and when it changed.
+BString
+DecorManager::_LoadedKey(const BString& path) const
+{
+	struct stat st;
+	if (stat(path.String(), &st) != 0)
+		return BString();
+	BString key;
+	key.SetToFormat("%" B_PRIdDEV ":%" B_PRIdINO ":%" B_PRIdTIME ":%s",
+		st.st_dev, st.st_ino, st.st_mtime, path.String());
+	return key;
 }
 
 

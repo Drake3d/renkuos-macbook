@@ -564,15 +564,21 @@ ModifiedPageQueue::_PageWriter()
 	page_num_t pagesSinceLastSuccessfulWrite = 0;
 
 	while (fWriterThread >= 0) {
-		if (queue.Count() < kNumPages) {
-			// wait the full amount when no one triggers us
+		if (queue.Count() < kNumPages && sUnderQuotaCondition.EntriesCount() == 0) {
+			// wait the full amount when nobody's waiting for us
 			if (!fPageWriterCondition.Wait(PAGES_FLUSH_DURATION_LOCAL_QUOTA, true))
 				continue;
 		}
 
 		page_num_t modifiedPages = queue.Count();
-		if (modifiedPages == 0)
+		if (modifiedPages == 0) {
+			if (!IsOverQuota()) {
+				// If write_modified_page_range() wrote out pages, or if
+				// modified pages were discarded, there could be waiters.
+				sUnderQuotaCondition.NotifyAll();
+			}
 			continue;
+		}
 
 		if (modifiedPages <= pagesSinceLastSuccessfulWrite) {
 			// We ran through the whole queue without being able to write a
@@ -794,7 +800,9 @@ vm_page_write_modified_page_range(struct VMCache* cache, uint32 firstPage,
 
 	while (true) {
 		vm_page* page = it.Next();
-		if (page == NULL || page->cache_offset >= endPage) {
+		const bool atEnd = page == NULL || page->cache_offset >= endPage;
+		const uint32 nextOffset = atEnd ? endPage : page->cache_offset + 1;
+		if (atEnd) {
 			if (transferEmpty)
 				break;
 
@@ -851,6 +859,15 @@ vm_page_write_modified_page_range(struct VMCache* cache, uint32 firstPage,
 			wrappers[usedWrappers++] = wrapper;
 		} else
 			transferEmpty = true;
+
+		if (atEnd && transferEmpty)
+			break;
+
+		// The iterator already holds the page after this one, and that page
+		// may have left the cache while it was unlocked: a page that is not
+		// in the cache any more (no cache, maybe freed) would be written
+		// next. Look the position up again.
+		it = cache->pages.GetIterator(nextOffset, true, true);
 	}
 
 	if (wrapperPool != stackWrappersPool) {

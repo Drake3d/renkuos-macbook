@@ -15,12 +15,115 @@
 #include <AutoDeleter.h>
 
 
+#include <cpu.h>
+
 #include "pch_i2c.h"
 
 
 device_manager_info* gDeviceManager;
 i2c_for_controller_interface* gI2c;
 acpi_module_info* gACPI;
+static pci_module_info* sPCI;
+
+
+//	#pragma mark - P-Unit semaphore (Intel Bay Trail)
+
+
+// The SoC message bus, reached through the configuration space of the host
+// bridge (Atom Z36xxx/Z37xxx datasheet volume 2, 329518, "MCR Description":
+// MCR D0h, MDR D4h, MCRX D8h, typically opcode 10h to read and 11h to
+// write). The P-Unit is port 04h.
+#define MBI_MCR					0xd0
+#define MBI_MDR					0xd4
+#define MBI_MCRX				0xd8
+#define MBI_REG_READ			0x10
+#define MBI_REG_WRITE			0x11
+#define MBI_UNIT_PUNIT			0x04
+
+// The semaphore that arbitrates the PMIC bus between the host and the
+// P-Unit. Bit 0 reads back as "owned by the host", writing bit 1 requests it.
+#define PUNIT_SEMAPHORE			0x07
+#define PUNIT_SEMAPHORE_OWNED	(1 << 0)
+#define PUNIT_SEMAPHORE_REQUEST	(1 << 1)
+#define PUNIT_SEMAPHORE_TIMEOUT	500000
+
+static spinlock sMessageBusLock = B_SPINLOCK_INITIALIZER;
+
+
+static uint32
+mbi_command(uint8 opcode, uint8 unit, uint32 offset)
+{
+	return ((uint32)opcode << 24) | ((uint32)unit << 16)
+		| ((offset & 0xff) << 8) | 0xf0;
+}
+
+
+static uint32
+mbi_read(uint8 unit, uint32 offset)
+{
+	cpu_status state = disable_interrupts();
+	acquire_spinlock(&sMessageBusLock);
+	sPCI->write_pci_config(0, 0, 0, MBI_MCRX, 4, offset & 0xffffff00);
+	sPCI->write_pci_config(0, 0, 0, MBI_MCR, 4,
+		mbi_command(MBI_REG_READ, unit, offset));
+	uint32 value = sPCI->read_pci_config(0, 0, 0, MBI_MDR, 4);
+	release_spinlock(&sMessageBusLock);
+	restore_interrupts(state);
+	return value;
+}
+
+
+static void
+mbi_write(uint8 unit, uint32 offset, uint32 value)
+{
+	cpu_status state = disable_interrupts();
+	acquire_spinlock(&sMessageBusLock);
+	sPCI->write_pci_config(0, 0, 0, MBI_MDR, 4, value);
+	sPCI->write_pci_config(0, 0, 0, MBI_MCRX, 4, offset & 0xffffff00);
+	sPCI->write_pci_config(0, 0, 0, MBI_MCR, 4,
+		mbi_command(MBI_REG_WRITE, unit, offset));
+	release_spinlock(&sMessageBusLock);
+	restore_interrupts(state);
+}
+
+
+static void
+release_punit_semaphore()
+{
+	uint32 value = mbi_read(MBI_UNIT_PUNIT, PUNIT_SEMAPHORE);
+	mbi_write(MBI_UNIT_PUNIT, PUNIT_SEMAPHORE,
+		value & ~(uint32)PUNIT_SEMAPHORE_OWNED);
+	cpu_unblock_deep_idle();
+}
+
+
+static status_t
+acquire_punit_semaphore()
+{
+	if (sPCI == NULL)
+		return B_NO_INIT;
+
+	// The P-Unit needs this bus to enter C6 and C7; a CPU entering them
+	// while the host owns the semaphore hangs the SoC.
+	cpu_block_deep_idle();
+
+	mbi_write(MBI_UNIT_PUNIT, PUNIT_SEMAPHORE, PUNIT_SEMAPHORE_REQUEST);
+
+	bigtime_t timeout = system_time() + PUNIT_SEMAPHORE_TIMEOUT;
+	while (true) {
+		if ((mbi_read(MBI_UNIT_PUNIT, PUNIT_SEMAPHORE)
+				& PUNIT_SEMAPHORE_OWNED) != 0) {
+			return B_OK;
+		}
+		if (system_time() > timeout)
+			break;
+		snooze(1000);
+	}
+
+	ERROR("PMIC bus: timed out waiting for the P-Unit semaphore\n");
+	release_punit_semaphore();
+	return B_TIMED_OUT;
+}
 
 
 static void
@@ -48,34 +151,48 @@ pch_i2c_interrupt_handler(pch_i2c_sim_info* bus)
 	if (enable == 0)
 		return B_UNHANDLED_INTERRUPT;
 
+	// The IC_CLR_* registers are cleared by reading them (DesignWare
+	// databook); a write does nothing and leaves the interrupt pending.
 	uint32 status = read32(bus->registers + PCH_IC_INTR_STAT);
+	if ((status & PCH_IC_INTR_STAT_TX_ABRT) != 0) {
+		// read the source before clearing the abort clears it too
+		bus->abort_source = read32(bus->registers + PCH_IC_TX_ABRT_SOURCE);
+		bus->error = B_IO_ERROR;
+	}
 	if ((status & PCH_IC_INTR_STAT_RX_UNDER) != 0)
-		write32(bus->registers + PCH_IC_CLR_RX_UNDER, 0);
+		read32(bus->registers + PCH_IC_CLR_RX_UNDER);
 	if ((status & PCH_IC_INTR_STAT_RX_OVER) != 0)
-		write32(bus->registers + PCH_IC_CLR_RX_OVER, 0);
+		read32(bus->registers + PCH_IC_CLR_RX_OVER);
 	if ((status & PCH_IC_INTR_STAT_TX_OVER) != 0)
-		write32(bus->registers + PCH_IC_CLR_TX_OVER, 0);
+		read32(bus->registers + PCH_IC_CLR_TX_OVER);
 	if ((status & PCH_IC_INTR_STAT_RD_REQ) != 0)
-		write32(bus->registers + PCH_IC_CLR_RD_REQ, 0);
+		read32(bus->registers + PCH_IC_CLR_RD_REQ);
 	if ((status & PCH_IC_INTR_STAT_TX_ABRT) != 0)
-		write32(bus->registers + PCH_IC_CLR_TX_ABRT, 0);
+		read32(bus->registers + PCH_IC_CLR_TX_ABRT);
 	if ((status & PCH_IC_INTR_STAT_RX_DONE) != 0)
-		write32(bus->registers + PCH_IC_CLR_RX_DONE, 0);
+		read32(bus->registers + PCH_IC_CLR_RX_DONE);
 	if ((status & PCH_IC_INTR_STAT_ACTIVITY) != 0)
-		write32(bus->registers + PCH_IC_CLR_ACTIVITY, 0);
+		read32(bus->registers + PCH_IC_CLR_ACTIVITY);
 	if ((status & PCH_IC_INTR_STAT_STOP_DET) != 0)
-		write32(bus->registers + PCH_IC_CLR_STOP_DET, 0);
+		read32(bus->registers + PCH_IC_CLR_STOP_DET);
 	if ((status & PCH_IC_INTR_STAT_START_DET) != 0)
-		write32(bus->registers + PCH_IC_CLR_START_DET, 0);
+		read32(bus->registers + PCH_IC_CLR_START_DET);
 	if ((status & PCH_IC_INTR_STAT_GEN_CALL) != 0)
-		write32(bus->registers + PCH_IC_CLR_GEN_CALL, 0);
+		read32(bus->registers + PCH_IC_CLR_GEN_CALL);
 
 	TRACE("pch_i2c_interrupt_handler %" B_PRIx32 "\n", status);
 
 	if ((status & ~PCH_IC_INTR_STAT_ACTIVITY) == 0)
 		return handled;
-	/*if ((status & PCH_IC_INTR_STAT_TX_ABRT) != 0)
-		tx error */
+	if ((status & PCH_IC_INTR_STAT_TX_ABRT) != 0) {
+		// no acknowledge (no device at the address) or lost arbitration:
+		// the transfer is over. Mask everything, so that nothing can fire
+		// again before the waiter has seen the error, and wake it up.
+		write32(bus->registers + PCH_IC_INTR_MASK, 0);
+		bus->wait_read.NotifyAll();
+		bus->wait_write.NotifyAll();
+		bus->wait_busy.NotifyAll();
+	}
 	if ((status & PCH_IC_INTR_STAT_RX_FULL) != 0)
 		bus->wait_read.NotifyAll();
 	if ((status & PCH_IC_INTR_STAT_TX_EMPTY) != 0)
@@ -102,12 +219,10 @@ set_sim(i2c_bus_cookie cookie, i2c_bus sim)
 
 
 static status_t
-exec_command(i2c_bus_cookie cookie, i2c_op op, i2c_addr slaveAddress,
+exec_command_unlocked(pch_i2c_sim_info* bus, i2c_op op, i2c_addr slaveAddress,
 	const void *cmdBuffer, size_t cmdLength, void* dataBuffer,
 	size_t dataLength)
 {
-	CALLED();
-	pch_i2c_sim_info* bus = (pch_i2c_sim_info*)cookie;
 
 	if (atomic_test_and_set(&bus->busy, 1, 0) != 0)
 		return B_BUSY;
@@ -129,6 +244,8 @@ exec_command(i2c_bus_cookie cookie, i2c_op op, i2c_addr slaveAddress,
 
 	TRACE("exec_command: write slave address\n");
 
+	bus->error = B_OK;
+	bus->abort_source = 0;
 	enable_device(bus, false);
 	write32(bus->registers + PCH_IC_CON,
 		read32(bus->registers + PCH_IC_CON) & ~PCH_IC_CON_10BIT_ADDR_MASTER);
@@ -196,12 +313,25 @@ exec_command(i2c_bus_cookie cookie, i2c_op op, i2c_addr slaveAddress,
 			bus->wait_read.Add(&waiter);
 
 			write32(bus->registers + PCH_IC_INTR_MASK,
-				PCH_IC_INTR_STAT_RX_FULL);
+				PCH_IC_INTR_STAT_RX_FULL | PCH_IC_INTR_STAT_TX_ABRT);
 
 			uint32 rxBytes = read32(bus->registers + PCH_IC_RXFLR);
+			if (rxBytes == 0 && bus->error != B_OK) {
+				write32(bus->registers + PCH_IC_INTR_MASK, 0);
+				bus->busy = 0;
+				return bus->error;
+			}
 			if (rxBytes == 0) {
 				// sleep until wake up by intr handler
-				if (waiter.Wait(B_RELATIVE_TIMEOUT, 500000L) != B_OK)
+				status_t waitStatus = waiter.Wait(B_RELATIVE_TIMEOUT, 500000L);
+				if (bus->error != B_OK) {
+					TRACE("exec_command: aborted, source %08" B_PRIx32 "\n",
+						bus->abort_source);
+					write32(bus->registers + PCH_IC_INTR_MASK, 0);
+					bus->busy = 0;
+					return bus->error;
+				}
+				if (waitStatus != B_OK)
 					ERROR("exec_command timed out waiting for read. Raw intr stat %08x TX ABORT SOURCE %08x\n",
 						read32(bus->registers + PCH_IC_RAW_INTR_STAT),
 						read32(bus->registers + PCH_IC_TX_ABRT_SOURCE));
@@ -238,13 +368,18 @@ exec_command(i2c_bus_cookie cookie, i2c_op op, i2c_addr slaveAddress,
 		TRACE("exec_command: waiting busy condition\n");
 		while (bus->busy) {
 			write32(bus->registers + PCH_IC_INTR_MASK,
-				PCH_IC_INTR_STAT_STOP_DET);
+				PCH_IC_INTR_STAT_STOP_DET | PCH_IC_INTR_STAT_TX_ABRT);
 
 			ConditionVariableEntry waiter;
 			bus->wait_busy.Add(&waiter);
 
 			if (!bus->busy)
 				break;
+			if (bus->error != B_OK) {
+				write32(bus->registers + PCH_IC_INTR_MASK, 0);
+				err = bus->error;
+				break;
+			}
 
 			// sleep until wake up by intr handler
 			err = waiter.Wait(B_RELATIVE_TIMEOUT, 500000L);
@@ -265,6 +400,47 @@ exec_command(i2c_bus_cookie cookie, i2c_op op, i2c_addr slaveAddress,
 	bus->busy = 0;
 
 	return err;
+}
+
+
+static status_t
+exec_command(i2c_bus_cookie cookie, i2c_op op, i2c_addr slaveAddress,
+	const void *cmdBuffer, size_t cmdLength, void* dataBuffer,
+	size_t dataLength)
+{
+	CALLED();
+	pch_i2c_sim_info* bus = (pch_i2c_sim_info*)cookie;
+
+	if (!bus->punit_semaphore) {
+		return exec_command_unlocked(bus, op, slaveAddress, cmdBuffer,
+			cmdLength, dataBuffer, dataLength);
+	}
+
+	status_t status = acquire_punit_semaphore();
+	if (status != B_OK)
+		return status;
+	status = exec_command_unlocked(bus, op, slaveAddress, cmdBuffer,
+		cmdLength, dataBuffer, dataLength);
+	release_punit_semaphore();
+	return status;
+}
+
+
+/*!	A complete transfer for users inside this driver (the ACPI operation
+	region): serializes with the I2C bus manager through the bus lock.
+*/
+status_t
+pch_i2c_transfer(pch_i2c_sim_info* bus, i2c_op op, i2c_addr slaveAddress,
+	const void* cmdBuffer, size_t cmdLength, void* dataBuffer,
+	size_t dataLength)
+{
+	status_t status = mutex_lock(&bus->lock);
+	if (status != B_OK)
+		return status;
+	status = exec_command(bus, op, slaveAddress, cmdBuffer, cmdLength,
+		dataBuffer, dataLength);
+	mutex_unlock(&bus->lock);
+	return status;
 }
 
 
@@ -454,10 +630,22 @@ init_bus(device_node* node, void** bus_cookie)
 		bus->base_addr, bus->map_size, B_ANY_KERNEL_ADDRESS,
 		B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA,
 		(void **)&bus->registers);
+	if (bus->registersArea < 0) {
+		ERROR("init_bus() cannot map the registers\n");
+		return bus->registersArea;
+	}
 
 	// init bus
 	uint32 version = read32(bus->registers + PCH_IC_COMP_VERSION);
 	TRACE_ALWAYS("version 0x%" B_PRIx32 "\n", version);
+	if (version == 0xffffffff) {
+		// Nothing decodes this address: the controller is off, hidden, or
+		// the firmware gave a stale address. Do not program it.
+		status = B_DEVICE_NOT_FOUND;
+		ERROR("init_bus() no controller at 0x%" B_PRIxPHYSADDR "\n",
+			bus->base_addr);
+		goto err;
+	}
 
 	if (bus->version >= PCH_SKYLAKE) {
 		bus->capabilities = read32(bus->registers + PCH_SUP_CAPABLITIES);
@@ -534,6 +722,8 @@ init_bus(device_node* node, void** bus_cookie)
 	}
 
 	*bus_cookie = bus;
+	if (bus->bus_started != NULL)
+		bus->bus_started(bus->bus_hook_cookie);
 	return status;
 
 err:
@@ -547,6 +737,9 @@ static void
 uninit_bus(void* bus_cookie)
 {
 	pch_i2c_sim_info* bus = (pch_i2c_sim_info*)bus_cookie;
+
+	if (bus->bus_stopping != NULL)
+		bus->bus_stopping(bus->bus_hook_cookie);
 
 	mutex_destroy(&bus->lock);
 	remove_io_interrupt_handler(bus->irq,
@@ -563,6 +756,7 @@ module_dependency module_dependencies[] = {
 	{ B_DEVICE_MANAGER_MODULE_NAME, (module_info**)&gDeviceManager },
 	{ B_ACPI_MODULE_NAME, (module_info**)&gACPI },
 	{ I2C_FOR_CONTROLLER_MODULE_NAME, (module_info**)&gI2c },
+	{ B_PCI_MODULE_NAME, (module_info**)&sPCI },
 	{}
 };
 

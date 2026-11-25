@@ -1031,8 +1031,10 @@ SysInfoView::_GetABIVersion()
 			abiVersion = versionInfo.short_info;
 	}
 
+	// libbe.so carries no release name on development builds, so show only
+	// the ABI then
 	if (abiVersion.IsEmpty())
-		abiVersion = B_TRANSLATE("Unknown");
+		return B_HAIKU_ABI_NAME;
 
 	abiVersion << " (" << B_HAIKU_ABI_NAME << ")";
 
@@ -1650,6 +1652,12 @@ AboutView::_CreateCreditsView()
 
 	fCreditsView->SetFontAndColor(be_plain_font, B_FONT_ALL, &fTextColor);
 	fCreditsView->Insert(kRenkuOSCurrentMaintainers);
+
+	fCreditsView->SetFontAndColor(&font, B_FONT_ALL, &fHaikuOrangeColor);
+	fCreditsView->Insert(B_TRANSLATE("RenkuOS current contributors:\n"));
+
+	fCreditsView->SetFontAndColor(be_plain_font, B_FONT_ALL, &fTextColor);
+	fCreditsView->Insert(kRenkuOSCurrentContributors);
 
 	fCreditsView->SetFontAndColor(&font, B_FONT_ALL, &fHaikuOrangeColor);
 	fCreditsView->Insert(B_TRANSLATE("Haiku maintainers:\n"));

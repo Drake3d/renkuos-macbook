@@ -60,6 +60,7 @@
 #include "AutoDeleter.h"
 #include "BBitmapBuffer.h"
 #include "BitmapManager.h"
+#include "Compositor.h"
 #include "Desktop.h"
 #include "DirectWindowInfo.h"
 #include "DrawingEngine.h"
@@ -74,6 +75,7 @@
 #include "ServerPicture.h"
 #include "ServerProtocol.h"
 #include "Window.h"
+#include "WindowBuffer.h"
 #include "WorkspacesView.h"
 
 
@@ -4414,10 +4416,26 @@ Window*
 ServerWindow::MakeWindow(BRect frame, const char* name,
 	window_look look, window_feel feel, uint32 flags, uint32 workspace)
 {
-	// The non-offscreen ServerWindow uses the DrawingEngine instance from
-	// the desktop.
-	return new(std::nothrow) ::Window(frame, name, look, feel, flags,
-		workspace, this, fDesktop->HWInterface()->CreateDrawingEngine());
+	Compositor* compositor = fDesktop->GetCompositor();
+	if (compositor == NULL) {
+		// The non-offscreen ServerWindow uses the DrawingEngine instance from
+		// the desktop.
+		return new(std::nothrow) ::Window(frame, name, look, feel, flags,
+			workspace, this, fDesktop->HWInterface()->CreateDrawingEngine());
+	}
+
+	// When compositing, it draws to a buffer of its own.
+	ObjectDeleter<WindowBufferHWInterface> interface(
+		new(std::nothrow) WindowBufferHWInterface(compositor));
+	if (!interface.IsSet() || interface->Initialize() != B_OK)
+		return NULL;
+
+	::Window* window = new(std::nothrow) ::Window(frame, name, look, feel, flags,
+		workspace, this, interface->CreateDrawingEngine());
+	if (window != NULL)
+		window->SetBufferInterface(interface.Detach());
+
+	return window;
 }
 
 
@@ -4432,10 +4450,37 @@ ServerWindow::HandleDirectConnection(int32 bufferState, int32 driverState)
 	STRACE(("HandleDirectConnection(bufferState = %" B_PRId32 ", driverState = "
 		"%" B_PRId32 ")\n", bufferState, driverState));
 
-	status_t status = fDirectWindowInfo->SetState(
-		(direct_buffer_state)bufferState, (direct_driver_state)driverState,
-		fDesktop->HWInterface()->FrontBuffer(), fWindow->Frame(),
-		fWindow->VisibleContentRegion());
+	status_t status;
+	WindowBuffer* buffer = NULL;
+	if (fWindow->BufferInterface() != NULL) {
+		buffer = const_cast<WindowBuffer*>(
+			&fWindow->BufferInterface()->Buffer());
+	}
+	if (buffer != NULL && buffer->HasScreenLayout() && buffer->Area() >= 0) {
+		// When compositing, the application draws to the window's buffer,
+		// which is laid out like the screen, and the compositor puts that on
+		// the screen like everything else. Everything else is as without
+		// compositing, screen coordinates included.
+		BRegion clip;
+		fWindow->GetContentRegion(&clip);
+		BRegion screen(BRect(0, 0, buffer->ScreenWidth() - 1,
+			buffer->ScreenHeight() - 1));
+		clip.IntersectWith(&screen);
+
+		status = fDirectWindowInfo->SetState(
+			(direct_buffer_state)bufferState, (direct_driver_state)driverState,
+			buffer, fWindow->Frame(), clip, buffer->Area());
+	} else if (buffer != NULL
+		&& (bufferState & B_DIRECT_MODE_MASK) != B_DIRECT_STOP) {
+		// There is nothing to draw to yet: the buffer gets its layout when
+		// the clipping is rebuilt, which comes first.
+		return;
+	} else {
+		status = fDirectWindowInfo->SetState(
+			(direct_buffer_state)bufferState, (direct_driver_state)driverState,
+			fDesktop->HWInterface()->FrontBuffer(), fWindow->Frame(),
+			fWindow->VisibleContentRegion());
+	}
 
 	if (status != B_OK) {
 		char errorString[256];

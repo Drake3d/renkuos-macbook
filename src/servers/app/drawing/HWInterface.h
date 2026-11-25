@@ -34,6 +34,36 @@ class RenderingBuffer;
 class ServerBitmap;
 
 
+// RenkuOS: collects the parts of the screen that changed, for a client that
+// copies the screen, such as a remote desktop server. HWInterface adds to it
+// from Invalidate(). It is only touched with HWInterface's observer lock
+// held.
+class ScreenObserver {
+public:
+								ScreenObserver() : fAll(true) {}
+
+			void				Include(const BRect& frame)
+									{
+										if (fAll)
+											return;
+										fDirty.Include(frame);
+										// A reader that falls behind gets
+										// one larger rectangle instead of
+										// an ever longer list.
+										if (fDirty.CountRects() > 256)
+											fDirty.Set(fDirty.Frame());
+									}
+			void				IncludeAll()
+									{ fAll = true; fDirty.MakeEmpty(); }
+
+private:
+	friend class HWInterface;
+
+			BRegion				fDirty;
+			bool				fAll;
+};
+
+
 class HWInterfaceListener {
 public:
 								HWInterfaceListener();
@@ -147,8 +177,22 @@ public:
 	// while CopyBackToFront() actually performs the operation
 	virtual	status_t			CopyBackToFront(const BRect& frame);
 
+	// A finished frame: where the screen can flip between two pages, it is
+	// copied to the hidden one, which is shown from the next retrace on.
+	virtual	status_t			PresentRegion(const BRegion& region);
+	// The drawing buffer has a frame that isn't on the screen yet. The
+	// cursor is drawn from the drawing buffer: until the frame is presented,
+	// it is only moved, and the frame then draws it where it is.
+			void				SetFramePending();
+	// The frame isn't presented after all.
+			void				CancelPendingFrame();
+	virtual	void				SetPageFlipping(bool enable) {}
+
 protected:
 	virtual	void				_CopyBackToFront(/*const*/ BRegion& region);
+	// Adds where the cursor was and is now, while a frame was pending, to
+	// \a update. The floating overlays lock must be held.
+			void				_TakeCursorDamage(BRegion& update);
 
 public:
 	// TODO: Just a quick and primitive way to get single buffered mode working.
@@ -169,9 +213,31 @@ public:
 			bool				HideFloatingOverlays();
 			void				ShowFloatingOverlays();
 
+	// The software cursor is drawn from the drawing buffer. While a
+	// compositor builds a frame there, it keeps the cursor from showing the
+	// frame half built.
+			bool				LockFloatingOverlays()
+									{ return fFloatingOverlaysLock.Lock(); }
+			void				UnlockFloatingOverlays()
+									{ fFloatingOverlaysLock.Unlock(); }
+
 	// Listener support
 			bool				AddListener(HWInterfaceListener* listener);
 			void				RemoveListener(HWInterfaceListener* listener);
+
+	// RenkuOS: screen observers. TakeScreenChanges() moves what changed
+	// since the last call into region, or sets all when the whole screen
+	// has to be read again.
+			bool				AddScreenObserver(ScreenObserver* observer);
+			void				RemoveScreenObserver(ScreenObserver* observer);
+			void				TakeScreenChanges(ScreenObserver* observer,
+									BRegion& region, bool& all);
+			void				IncludeAllScreenChanges(
+									ScreenObserver* observer);
+			// Changes whenever the cursor shape changes.
+			int32				CursorGeneration() const
+									{ return atomic_get(
+										(int32*)&fCursorGeneration); }
 
 protected:
 	// implement this in derived classes
@@ -226,6 +292,8 @@ protected:
 			ObjectDeleter<buffer_clip>
 								fCursorAreaBackup;
 	mutable	BLocker				fFloatingOverlaysLock;
+			bool				fFramePending;
+			BRegion				fPendingCursorDamage;
 
 			ServerCursorReference
 								fCursor;
@@ -244,7 +312,15 @@ protected:
 			int					fVGADevice;
 
 private:
+			void				_ScreenChanged(const BRect& frame);
+			void				_WholeScreenChanged();
+
 			BList				fListeners;
+
+			BLocker				fScreenObserverLock;
+			BList				fScreenObservers;
+			int32				fScreenObserverCount;
+			int32				fCursorGeneration;
 };
 
 #endif // HW_INTERFACE_H

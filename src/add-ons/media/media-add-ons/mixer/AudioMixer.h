@@ -131,8 +131,15 @@ protected:
 			void				PublishEventLatencyChange();
 
 private:
+			MixerOutput*		_ClockOutput();
 			void				_AutoStart();
 			void				_AutoStop();
+			void				_ConnectOtherOutput(MixerOutput* output,
+									const media_destination& destination,
+									char* name);
+			MixerOutput*		_OtherOutput(int32 id);
+			int32				_BufferCount(MixerOutput* output) const;
+			void				_GrowBufferGroups();
 
 			BMediaAddOn*		fAddOn;
 			MixerCore*			fCore;
@@ -143,6 +150,9 @@ private:
 			media_format		fDefaultFormat;
 			bigtime_t			fLastLateNotification;
 			bigtime_t			fLastLateness;
+			int32				fNextFirstID;
+				// source id of an output that is being connected to take
+				// the detached first output's place, or -1
 };
 
 

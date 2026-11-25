@@ -85,6 +85,13 @@ compat_close(void *cookie)
 
 	atomic_or(&ifp->flags, DEVICE_CLOSED);
 
+	if (!HAIKU_DRIVER_REQUIRES(FBSD_WLAN_FEATURE)) {
+		// Stop the NIC (wlan_close does this for WLAN) and drop unread frames.
+		ifp->if_flags &= ~IFF_UP;
+		ifp->if_ioctl(ifp, SIOCSIFFLAGS, NULL);
+		IF_DRAIN(&ifp->receive_queue);
+	}
+
 	wlan_close(cookie);
 
 	release_sem_etc(ifp->receive_sem, 1, B_RELEASE_ALL);
@@ -185,12 +192,16 @@ compat_send(void *cookie, net_buffer *buffer)
 	}
 
 	status_t status = gBufferModule->read(buffer, 0, mtod(mb, void *), length);
-	if (status != B_OK)
+	if (status != B_OK) {
+		m_freem(mb);
 		return status;
+	}
 	mb->m_pkthdr.len = mb->m_len = length;
 
-	if ((ifp->flags & DEVICE_CLOSED) != 0)
+	if ((ifp->flags & DEVICE_CLOSED) != 0) {
+		m_freem(mb);
 		return B_INTERRUPTED;
+	}
 
 	IFF_LOCKGIANT(ifp);
 	int result = ifp->if_output(ifp, mb, NULL, NULL);

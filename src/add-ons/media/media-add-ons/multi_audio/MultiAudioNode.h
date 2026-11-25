@@ -23,10 +23,22 @@
 
 
 class BDiscreteParameter;
+class BParameter;
 class BParameterGroup;
 
 class node_input;
 class node_output;
+
+
+// One place a connection can go: a bus as the driver groups its channels
+// (the jacks this node always had), or a single channel. Every port keeps one
+// free jack, so it takes any number of connections (see _KeepOneFreeInput()).
+struct channel_port {
+	int32				channelId;
+		// first device channel, as in the driver's channel list
+	int32				channelCount;
+	char				name[B_MEDIA_NAME_LENGTH];
+};
 
 
 class MultiAudioNode : public BBufferConsumer, public BBufferProducer,
@@ -53,6 +65,8 @@ public:
 
 protected:
 	virtual	void				Preroll();
+	virtual	void				Stop(bigtime_t performanceTime,
+									bool immediate);
 	virtual	void				NodeRegistered();
 	virtual	status_t			RequestCompleted(
 									const media_request_info& info);
@@ -196,15 +210,38 @@ private:
 										.record_buffers
 											[cycle][channel].stride; }
 
+			void				_AddPort(channel_port* ports, int32 capacity,
+									int32& count, int32 channelId,
+									int32 channelCount, const char* name);
+			node_input*			_AddInput(int32 port, int32 id);
+			node_output*		_AddOutput(int32 port, int32 id);
+			void				_KeepOneFreeInput(int32 port);
+			void				_KeepOneFreeOutput(int32 port);
+			bool				_ChannelFed(int32 channel,
+									const node_input* except);
+			void				_SilenceChannel(int32 channel);
+
 			void				_WriteZeros(node_input& input,
 									uint32 bufferCycle);
 			void				_FillWithZeros(node_input& input);
-			void				_FillNextBuffer(node_input& channel,
-									BBuffer* buffer);
+			int64				_PlaybackSlotFrame(
+									const multi_buffer_info& info);
+			void				_AllocateRing(node_input& input);
+			void				_ClearRing(node_input& input);
+			void				_WriteToRing(node_input& input,
+									BBuffer* buffer, int64 slotFrame);
+			void				_PlayFromRing(node_input& input,
+									int64 slotFrame, bool* fed);
+			bigtime_t			_RecordStartTime(
+									const multi_buffer_info& info,
+									node_output& output);
 
 	static	int32				_OutputThreadEntry(void* data);
 			int32				_OutputThread();
 			status_t			_StartOutputThreadIfNeeded();
+			bool				_InUse() const;
+			void				_RunWhileInUse();
+			void				_StopWhenUnused();
 			status_t			_StopOutputThread();
 			void				_EnterDeviceGone();
 			void				_LeaveDeviceGone(bigtime_t goneSince);
@@ -242,6 +279,12 @@ private:
 			void				_UpdateInternalLatency(
 									const media_format& format);
 
+			size_t				_MixValueSize(BParameter* parameter) const;
+			void				_RememberValue(int32 id, const void* value,
+									size_t size);
+			bool				_RememberedValue(int32 id, const void** _value,
+									ssize_t* _size) const;
+
 private:
 			status_t			fInitStatus;
 
@@ -255,6 +298,19 @@ private:
 
 			bigtime_t 			fLatency;
 			BList				fOutputs;
+
+			channel_port*		fInputPorts;
+			int32				fInputPortCount;
+			channel_port*		fOutputPorts;
+			int32				fOutputPortCount;
+				// allocated in NodeRegistered(), two per device channel at
+				// most: a port per bus and one per channel of a bus
+			int32				fNextInputId;
+			int32				fNextOutputId;
+				// ids for the jacks added after NodeRegistered(); the first
+				// jack of each port keeps a fixed id, so a saved default
+				// output channel ("output 0" = id 0) still finds its jack
+
 			media_format 		fOutputPreferredFormat;
 			media_format 		fInputPreferredFormat;
 			int32				fActiveOutputs;
@@ -263,12 +319,19 @@ private:
 				// this is computed from the real (negotiated) chunk size and bit rate,
 				// not the defaults that are in the parameters
 			bigtime_t			fBufferPeriod;
+			int64				fPlayFrame;
+				// performance-time frame at which the playback slot filled
+				// last starts playing; -1 until the next exchange places one
 
 			int32				fQuitThread;
 			thread_id			fThread;
 			MultiAudioDevice*	fDevice;
 			BParameterWeb*		fWeb;
 			BMessage			fConfig;
+				// the configuration this node was created with, kept up to
+				// date with every mix value set successfully; it stands in for
+				// values the device cannot report (unplugged) when the
+				// configuration is saved
 };
 
 

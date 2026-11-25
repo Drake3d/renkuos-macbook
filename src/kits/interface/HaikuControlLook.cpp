@@ -11,7 +11,11 @@
 
 #include <HaikuControlLook.h>
 
+#include <stdlib.h>
+#include <string.h>
+
 #include <algorithm>
+#include <new>
 
 #include <Bitmap.h>
 #include <Control.h>
@@ -32,6 +36,9 @@ static const float kHoverTintFactor = 0.85;
 
 static const int32 kButtonPopUpIndicatorWidth = B_USE_ITEM_SPACING;
 
+// how far apart in brightness a label's color and background have to be to read
+static const int32 kMinLabelContrast = 80;
+
 static const rgb_color kBlack = { 0, 0, 0, 255 };
 static const rgb_color kWhite = { 255, 255, 255, 255 };
 
@@ -40,6 +47,24 @@ HaikuControlLook::HaikuControlLook()
 	:
 	fCachedOutline(false)
 {
+	BControlLook* outer = NULL;
+	memcpy(_reserved, &outer, sizeof(outer));
+}
+
+
+/*!	Creates a default look that sends its calls to its own virtual methods,
+	and reads the background info, from \a outer instead of itself. A look
+	add-on that wraps the default look passes itself, so its overrides are
+	also used inside the default look's composite drawing.
+*/
+HaikuControlLook::HaikuControlLook(BControlLook* outer)
+	:
+	fCachedOutline(false)
+{
+	// Kept in BControlLook's reserved space rather than a member of its
+	// own, so that HaikuControlLook keeps its size for looks that still
+	// subclass it.
+	memcpy(_reserved, &outer, sizeof(outer));
 }
 
 
@@ -639,12 +664,13 @@ HaikuControlLook::DrawScrollBarButton(BView* view, BRect rect,
 	bool isEnabled = (flags & B_DISABLED) == 0;
 
 	rgb_color buttonColor = isEnabled ? base : tint_color(base, B_LIGHTEN_1_TINT);
-	DrawButtonBackground(view, rect, updateRect, buttonColor, flags,
+	_Outer()->DrawButtonBackground(view, rect, updateRect, buttonColor, flags,
 		BControlLook::B_ALL_BORDERS, orientation);
 
 	rect.InsetBy(-1, -1);
 	rgb_color textColor = isEnabled ? text : tint_color(text, B_LIGHTEN_1_TINT);
-	DrawArrowShape(view, rect, updateRect, textColor, direction, flags, 1);
+	_Outer()->DrawArrowShape(view, rect, updateRect, textColor, direction, flags,
+		1);
 
 	// revert clipping constraints
 	view->PopState();
@@ -655,8 +681,10 @@ HaikuControlLook::DrawScrollBarBackground(BView* view, BRect& rect1,
 	BRect& rect2, const BRect& updateRect, const rgb_color& base, uint32 flags,
 	orientation orientation)
 {
-	DrawScrollBarBackground(view, rect1, updateRect, base, flags, orientation);
-	DrawScrollBarBackground(view, rect2, updateRect, base, flags, orientation);
+	_Outer()->DrawScrollBarBackground(view, rect1, updateRect, base, flags,
+		orientation);
+	_Outer()->DrawScrollBarBackground(view, rect2, updateRect, base, flags,
+		orientation);
 }
 
 
@@ -796,7 +824,7 @@ HaikuControlLook::DrawScrollBarThumb(BView* view, BRect& rect,
 	// draw scroll thumb
 	if (isEnabled) {
 		// fill the clickable surface of the thumb
-		DrawButtonBackground(view, rect, updateRect, thumbColor, 0,
+		_Outer()->DrawButtonBackground(view, rect, updateRect, thumbColor, 0,
 			B_ALL_BORDERS, orientation);
 	} else {
 		// thumb bevel
@@ -1146,13 +1174,13 @@ HaikuControlLook::DrawSliderBar(BView* view, BRect rect, const BRect& updateRect
 
 	view->PushState();
 	view->ClipToRect(leftBarSide);
-	DrawSliderBar(view, rect, updateRect, base, leftFillColor, flags,
+	_Outer()->DrawSliderBar(view, rect, updateRect, base, leftFillColor, flags,
 		orientation);
 	view->PopState();
 
 	view->PushState();
 	view->ClipToRect(rightBarSide);
-	DrawSliderBar(view, rect, updateRect, base, rightFillColor, flags,
+	_Outer()->DrawSliderBar(view, rect, updateRect, base, rightFillColor, flags,
 		orientation);
 	view->PopState();
 }
@@ -1355,7 +1383,7 @@ HaikuControlLook::DrawSliderThumb(BView* view, BRect& rect, const BRect& updateR
 		frameShadowColor, frameShadowColor);
 
 	flags &= ~B_ACTIVATED;
-	DrawButtonBackground(view, rect, updateRect, base, flags);
+	_Outer()->DrawButtonBackground(view, rect, updateRect, base, flags);
 
 	// thumb shadow
 	view->SetDrawingMode(B_OP_ALPHA);
@@ -1402,7 +1430,8 @@ HaikuControlLook::DrawSliderTriangle(BView* view, BRect& rect,
 	const BRect& updateRect, const rgb_color& base, uint32 flags,
 	orientation orientation)
 {
-	DrawSliderTriangle(view, rect, updateRect, base, base, flags, orientation);
+	_Outer()->DrawSliderTriangle(view, rect, updateRect, base, base, flags,
+		orientation);
 }
 
 
@@ -1647,7 +1676,7 @@ HaikuControlLook::DrawTabFrame(BView* view, BRect& rect,
 			rect.InsetBy(0, -1);
 	}
 
-	DrawInactiveTab(view, rect, rect, base, 0, borders, side);
+	_Outer()->DrawInactiveTab(view, rect, rect, base, 0, borders, side);
 }
 
 
@@ -1964,7 +1993,8 @@ HaikuControlLook::DrawSplitter(BView* view, BRect& rect, const BRect& updateRect
 
 	// frame
 	if (borders != 0 && rect.Width() > 3 && rect.Height() > 3)
-		DrawRaisedBorder(view, rect, updateRect, background, flags, borders);
+		_Outer()->DrawRaisedBorder(view, rect, updateRect, background, flags,
+			borders);
 
 	// dots and rest of background
 	if (orientation == B_HORIZONTAL) {
@@ -2199,8 +2229,8 @@ HaikuControlLook::DrawLabel(BView* view, const char* label, BRect rect,
 	const BRect& updateRect, const rgb_color& base, uint32 flags,
 	const rgb_color* textColor)
 {
-	DrawLabel(view, label, NULL, rect, updateRect, base, flags,
-		DefaultLabelAlignment(), textColor);
+	_Outer()->DrawLabel(view, label, NULL, rect, updateRect, base, flags,
+		_Outer()->DefaultLabelAlignment(), textColor);
 }
 
 
@@ -2209,8 +2239,8 @@ HaikuControlLook::DrawLabel(BView* view, const char* label, BRect rect,
 	const BRect& updateRect, const rgb_color& base, uint32 flags,
 	const BAlignment& alignment, const rgb_color* textColor)
 {
-	DrawLabel(view, label, NULL, rect, updateRect, base, flags, alignment,
-		textColor);
+	_Outer()->DrawLabel(view, label, NULL, rect, updateRect, base, flags,
+		alignment, textColor);
 }
 
 
@@ -2231,12 +2261,20 @@ HaikuControlLook::DrawLabel(BView* view, const char* label, const rgb_color& bas
 
 	if (textColor != NULL)
 		glowColor = *textColor;
-	else if (view->Parent() != NULL)
-		glowColor = view->Parent()->HighColor();
-	else if ((flags & B_IS_CONTROL) != 0)
-		glowColor = ui_color(B_CONTROL_TEXT_COLOR);
-	else
-		glowColor = ui_color(B_PANEL_TEXT_COLOR);
+	else {
+		glowColor = ui_color((flags & B_IS_CONTROL) != 0
+			? B_CONTROL_TEXT_COLOR : B_PANEL_TEXT_COLOR);
+
+		// A parent that only set its background still has a black high color,
+		// which can't be read on a dark one, so it isn't used then.
+		if (view->Parent() != NULL) {
+			const rgb_color parentColor = view->Parent()->HighColor();
+			if (abs(parentColor.Brightness() - base.Brightness())
+					>= kMinLabelContrast) {
+				glowColor = parentColor;
+			}
+		}
+	}
 
 	color = glowColor;
 
@@ -2258,18 +2296,18 @@ HaikuControlLook::DrawLabel(BView* view, const char* label, const rgb_color& bas
 		}
 
 		// drawing occurs on the desktop
-		if (fCachedWorkspace != current_workspace()) {
+		if (_Outer()->fCachedWorkspace != current_workspace()) {
 			int8 indice = 0;
 			int32 mask;
 			bool tmpOutline;
-			while (fBackgroundInfo.FindInt32("be:bgndimginfoworkspaces",
+			while (_Outer()->fBackgroundInfo.FindInt32("be:bgndimginfoworkspaces",
 					indice, &mask) == B_OK
-				&& fBackgroundInfo.FindBool("be:bgndimginfoerasetext",
+				&& _Outer()->fBackgroundInfo.FindBool("be:bgndimginfoerasetext",
 					indice, &tmpOutline) == B_OK) {
 
 				if (((1 << current_workspace()) & mask) != 0) {
 					fCachedOutline = tmpOutline;
-					fCachedWorkspace = current_workspace();
+					_Outer()->fCachedWorkspace = current_workspace();
 					break;
 				}
 				indice++;
@@ -2358,7 +2396,7 @@ HaikuControlLook::DrawLabel(BView* view, const char* label, const BBitmap* icon,
 	float height = 0;
 
 	if (icon != NULL) {
-		width = icon->Bounds().Width() + DefaultLabelSpacing() + 1;
+		width = icon->Bounds().Width() + _Outer()->DefaultLabelSpacing() + 1;
 		height = icon->Bounds().Height() + 1;
 		textOffset = width;
 		availableWidth -= textOffset;
@@ -2398,7 +2436,8 @@ HaikuControlLook::DrawLabel(BView* view, const char* label, const BBitmap* icon,
 	if (textHeight < height)
 		location.y += ceilf((height - textHeight) / 2);
 
-	DrawLabel(view, truncatedLabel.String(), base, flags, location, textColor);
+	_Outer()->DrawLabel(view, truncatedLabel.String(), base, flags, location,
+		textColor);
 }
 
 
@@ -3947,4 +3986,26 @@ HaikuControlLook::_RadioButtonAndCheckBoxMarkColor(const rgb_color& base,
 	return true;
 }
 
+//!	The look whose virtual methods this one calls: itself, or the one wrapping
+//	it.
+BControlLook*
+HaikuControlLook::_Outer() const
+{
+	BControlLook* outer;
+	memcpy(&outer, _reserved, sizeof(outer));
+	return outer != NULL ? outer : const_cast<HaikuControlLook*>(this);
+}
+
+
 } // namespace BPrivate
+
+
+/*!	Returns a new default control look, for a look add-on that wraps it
+	instead of subclassing the private HaikuControlLook. \a outer is the
+	add-on's look; the caller owns the returned look and deletes it.
+*/
+extern "C" BControlLook*
+create_default_control_look(BControlLook* outer)
+{
+	return new(std::nothrow) BPrivate::HaikuControlLook(outer);
+}

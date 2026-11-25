@@ -72,6 +72,12 @@ public:
 			rgb_color			UIColor(color_which which) const;
 
 			bool				SubpixelAntialiasing() const;
+			bool				CompositedDesktop() const;
+			bool				CompositedShadows() const;
+			bool				CompositedRoundedCorners() const;
+			bool				CompositedDragTransparency() const;
+			bool				CompositedWobblyWindows() const;
+			uint8				CompositedWobbliness() const;
 			uint8				Hinting() const;
 			uint8				SubpixelAverageWeight() const;
 			bool				IsSubpixelOrderingRegular() const;
@@ -106,6 +112,13 @@ public:
 									bool* changed = NULL);
 
 			void				SetSubpixelAntialiasing(bool subpix);
+			void				SetCompositedDesktop(bool composited);
+			void				SetCompositedShadows(bool shadows);
+			void				SetCompositedRoundedCorners(bool rounded);
+			void				SetCompositedDragTransparency(
+									bool transparent);
+			void				SetCompositedWobblyWindows(bool wobbly);
+			void				SetCompositedWobbliness(uint8 wobbliness);
 			void				SetHinting(uint8 hinting);
 			void				SetSubpixelAverageWeight(uint8 averageWeight);
 			void				SetSubpixelOrderingRegular(
