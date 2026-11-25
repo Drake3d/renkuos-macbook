@@ -7,8 +7,8 @@ computer. This branch (`notes`) holds only notes; the code is on the
 ## Where things are
 
 - Code: github.com/Drake3d/renkuos-macbook, branch `apple-spi-input`
-  (based on RenkuOS/Source `main`). Tip: `cbd487cfad` "build: package the
-  FaceTime HD camera support".
+  (based on RenkuOS/Source `main`). Tip: `24f9dc8e84` "Merge RenkuOS main
+  into apple-spi-input" (RenkuOS `main` at `7b0177e735`, 2026-11-25).
 - Remotes in a working clone:
   - `origin` = https://github.com/RenkuOS/Source.git (read only for us)
   - `personal` = https://github.com/Drake3d/renkuos-macbook.git
@@ -29,11 +29,44 @@ Then create `build/jam/UserBuildConfig` (git-ignored):
 # Personal build settings (git-ignored).
 AddOptionalHaikuImagePackages AppleSPIInput ;
 AddOptionalHaikuImagePackages FaceTimeHD ;
+
+# Personal test images only: put Apple's camera files into the image.
+# Adjust the folder to wherever the two files are on this computer.
+local fthdWorking = /Volumes/Source/working ;
+AddFilesToHaikuImage system non-packaged data firmware facetimehd
+	: $(fthdWorking)/fthd-extract/firmware.bin
+	  $(fthdWorking)/setfile-extract/1571_01XX.dat ;
 ```
+
+The last block is optional; without it, copy the camera files by hand
+(see "Camera" below). With it, a freshly flashed or installed image has a
+working camera (tested 2026-11-25). The files stay outside the repository.
 
 Configure and build as usual for Haiku (x86_64), in `generated.x86_64`:
 `jam -q -j<cores> @nightly-anyboot`, or single targets such as
 `facetimehd.hpkg`, `apple_spi_input.hpkg`, `hda`.
+
+Build host gotcha (macOS): host tools under `generated.x86_64/objects/darwin`
+can stay linked to a library that is gone (in November they pointed at
+MacPorts' `/opt/local/lib/libz.1.dylib` after MacPorts was removed). If a
+tool aborts with "dyld: Library not loaded", find them with
+`otool -L <tool> | grep /opt/local`, delete those tools, and run jam again.
+
+### Updating from RenkuOS main
+
+Done once on 2026-11-25 by merging (not rebasing, so pushed history stays):
+
+```
+git fetch origin
+git branch -f main origin/main
+git switch apple-spi-input
+git merge --no-ff origin/main
+```
+
+Watch for: new shared HID sources in `hid_shared/` that every HID driver
+Jamfile lists (the `apple_spi` Jamfile must list them too; last time
+`MouseReportDecoder.cpp`), and `drivers/input/Jamfile` conflicts.
+Build, test the nightly on the MacBook, then commit the merge.
 
 ## Rules we work by
 
@@ -61,11 +94,15 @@ Configure and build as usual for Haiku (x86_64), in `generated.x86_64`:
 - FaceTime HD camera (5 commits): driver `facetimehd`, test tool
   `facetimehd_capture`, media add-on (CodyCam works, ~30 fps), Camera
   preferences app (built, NOT yet tested), package `facetimehd.hpkg`.
+- Merged RenkuOS `main` (711 commits) on 2026-11-25; nightly tested on
+  the MacBook, including a fresh install with the camera files built in.
 
 ## Camera: files the user must supply
 
 Both go in `/boot/system/non-packaged/data/firmware/facetimehd/` on the
-MacBook. A fresh ISO wipes them, so copy them again after reflashing.
+MacBook. A fresh ISO wipes them unless the `AddFilesToHaikuImage` block in
+`UserBuildConfig` (above) builds them into the image; otherwise copy them
+again after reflashing. Never commit them.
 
 - `firmware.bin` (sha256 240ef2e9...4330, 1,417,220 bytes): from
   AppleCameraInterface in macOSUpdCombo10.12.6.dmg; gzip at offset 81920,
@@ -86,7 +123,8 @@ MacBook. A fresh ISO wipes them, so copy them again after reflashing.
    try Media preferences > Restart media services and save the syslog.
 6. Microphone is quiet; optional higher default gain.
 7. Wi-Fi (BCM4350): researched only, on hold; see wifi-bcm4350-plan.md.
-8. Updating from RenkuOS `main` and rebasing this branch: not done yet.
+8. After the merge, check the internal microphone and the input selector
+   (upstream reworked hda mux controls) and display moves on Kaby Lake.
 
 ## Notes in this branch
 
