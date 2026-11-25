@@ -125,9 +125,12 @@ again after reflashing. Never commit them.
 7. Wi-Fi (BCM4350): researched only, on hold; see wifi-bcm4350-plan.md.
 8. After the merge, check the internal microphone and the input selector
    (upstream reworked hda mux controls) and display moves on Kaby Lake.
+9. APFS read-only file system: design written, not started; see
+   apfs-readonly-design.md.
 
 ## Notes in this branch
 
 - camera-facetimehd-design.md: camera hardware, sources, phase results.
 - sound-cs8409-design.md: CS8409 audio design and provenance.
 - wifi-bcm4350-plan.md: Wi-Fi plan (on hold).
+- apfs-readonly-design.md: APFS read-only file system design (not started).
