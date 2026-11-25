@@ -1,0 +1,9 @@
+SubDir HAIKU_TOP src add-ons media media-add-ons facetimehd ;
+
+SubDirHdrs [ FDirName $(HAIKU_TOP) src add-ons kernel drivers video facetimehd ] ;
+
+Addon facetimehd.media_addon :
+	AddOn.cpp
+	Producer.cpp
+	: be media [ TargetLibsupc++ ]
+;
