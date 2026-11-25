@@ -1,0 +1,14 @@
+SubDir HAIKU_TOP src add-ons kernel drivers video facetimehd ;
+
+UsePrivateKernelHeaders ;
+
+SubDirHdrs [ FDirName $(HAIKU_TOP) src add-ons kernel bus_managers acpi acpica include ] ;
+SubDirHdrs [ FDirName $(HAIKU_TOP) src add-ons kernel bus_managers acpi acpica include platform ] ;
+
+KernelAddon facetimehd :
+	driver.cpp
+	hardware.cpp
+	isp.cpp
+	memory.cpp
+	stream.cpp
+;

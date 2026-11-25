@@ -1,3 +1,4 @@
 SubDir HAIKU_TOP src add-ons kernel drivers video ; 
 
+SubInclude HAIKU_TOP src add-ons kernel drivers video facetimehd ;
 SubInclude HAIKU_TOP src add-ons kernel drivers video usb_vision ;
