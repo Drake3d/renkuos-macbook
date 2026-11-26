@@ -38,6 +38,7 @@
 #include <fs_info.h>
 #include <fs_interface.h>
 #include <fs_volume.h>
+#include <io_requests.h>
 #include <kernel.h>
 
 #endif	// !FS_SHELL

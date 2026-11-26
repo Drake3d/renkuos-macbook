@@ -630,6 +630,8 @@ struct apfs_j_drec_val {
 // "j_xattr_key_t", "j_xattr_val_t", "j_xattr_flags"
 #define APFS_XATTR_DATA_STREAM			0x0001
 #define APFS_XATTR_DATA_EMBEDDED		0x0002
+#define APFS_XATTR_FILE_SYSTEM_OWNED	0x0004
+#define APFS_XATTR_MAX_EMBEDDED_SIZE	3804
 #define APFS_SYMLINK_EA_NAME			"com.apple.fs.symlink"
 
 struct apfs_j_xattr_key {
@@ -679,6 +681,12 @@ struct apfs_j_dstream {
 	uint64	default_crypto_id;
 	uint64	total_bytes_written;
 	uint64	total_bytes_read;
+} _PACKED;
+
+// "j_xattr_dstream_t": the value of a stream-backed extended attribute.
+struct apfs_j_xattr_dstream {
+	uint64	xattr_obj_id;
+	apfs_j_dstream	dstream;
 } _PACKED;
 
 // "xf_blob_t", "x_field_t", "Extended-Field Types"

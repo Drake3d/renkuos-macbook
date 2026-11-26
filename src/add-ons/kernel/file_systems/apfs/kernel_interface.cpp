@@ -7,8 +7,9 @@
  * Milestone 1: recognizes APFS containers, mounts one volume after reading
  * the container checkpoint, object maps and the volume's file-system tree
  * root, and lists every volume in the syslog.
- * Milestone 2: directories, stat, symlinks and reading uncompressed files
- * (directly from their extents; the file cache comes with milestone 3).
+ * Milestone 2: directories, stat, symlinks and reading uncompressed files.
+ * Milestone 3: files go through the file cache and file map (read_pages,
+ * io, get_file_map), so they can be memory-mapped and executed.
  */
 
 
@@ -193,6 +194,156 @@ apfs_read_fs_info(fs_volume* _volume, struct fs_info* info)
 }
 
 
+// #pragma mark - File map and paging
+
+
+static status_t
+apfs_get_file_map(fs_volume* _volume, fs_vnode* _node, off_t offset,
+	size_t size, struct file_io_vec* vecs, size_t* _count)
+{
+	Inode* inode = (Inode*)_node->private_node;
+	size_t index = 0;
+	size_t max = *_count;
+
+	if (offset < 0)
+		return B_BAD_VALUE;
+
+	while (size > 0 && offset < inode->Size()) {
+		off_t diskOffset;
+		off_t length;
+		status_t status = inode->FindExtent(offset, &diskOffset, &length);
+		if (status != B_OK)
+			return status;
+		if (length <= 0)
+			return B_BAD_DATA;
+
+		// Join runs that continue each other on disk (or holes).
+		if (index > 0 && ((diskOffset == -1 && vecs[index - 1].offset == -1)
+				|| (diskOffset != -1 && vecs[index - 1].offset != -1
+					&& vecs[index - 1].offset + vecs[index - 1].length
+						== diskOffset))) {
+			vecs[index - 1].length += length;
+		} else {
+			if (index >= max) {
+				*_count = index;
+				return B_BUFFER_OVERFLOW;
+			}
+			vecs[index].offset = diskOffset;
+			vecs[index].length = length;
+			index++;
+		}
+
+		offset += length;
+		size = (off_t)size > length ? size - length : 0;
+	}
+
+	*_count = index;
+	return B_OK;
+}
+
+
+static status_t
+iterative_io_get_vecs_hook(void* cookie, io_request* request, off_t offset,
+	size_t size, struct file_io_vec* vecs, size_t* _count)
+{
+	Inode* inode = (Inode*)cookie;
+	return file_map_translate(inode->FileMap(), offset, size, vecs, _count,
+		inode->GetVolume()->BlockSize());
+}
+
+
+static status_t
+iterative_io_finished_hook(void* cookie, io_request* request, status_t status,
+	bool partialTransfer, size_t bytesTransferred)
+{
+	// Nothing to unlock: the volume never changes while mounted.
+	return B_OK;
+}
+
+
+static bool
+apfs_can_page(fs_volume* _volume, fs_vnode* _node, void* _cookie)
+{
+	Inode* inode = (Inode*)_node->private_node;
+	return inode->FileCache() != NULL;
+}
+
+
+static status_t
+apfs_read_pages(fs_volume* _volume, fs_vnode* _node, void* _cookie,
+	off_t pos, const iovec* vecs, size_t count, size_t* _numBytes)
+{
+	Volume* volume = (Volume*)_volume->private_volume;
+	Inode* inode = (Inode*)_node->private_node;
+
+	if (inode->FileMap() == NULL)
+		return B_BAD_VALUE;
+
+	uint32 vecIndex = 0;
+	size_t vecOffset = 0;
+	size_t bytesLeft = *_numBytes;
+	status_t status;
+
+	while (true) {
+		file_io_vec fileVecs[8];
+		size_t fileVecCount = 8;
+
+		status = file_map_translate(inode->FileMap(), pos, bytesLeft,
+			fileVecs, &fileVecCount, 0);
+		if (status != B_OK && status != B_BUFFER_OVERFLOW)
+			break;
+
+		bool bufferOverflow = status == B_BUFFER_OVERFLOW;
+
+		size_t bytes = bytesLeft;
+		status = read_file_io_vec_pages(volume->Device(), fileVecs,
+			fileVecCount, vecs, count, &vecIndex, &vecOffset, &bytes);
+		if (status != B_OK || !bufferOverflow)
+			break;
+
+		pos += bytes;
+		bytesLeft -= bytes;
+	}
+
+	return status;
+}
+
+
+static status_t
+apfs_write_pages(fs_volume* _volume, fs_vnode* _node, void* _cookie,
+	off_t pos, const iovec* vecs, size_t count, size_t* _numBytes)
+{
+	*_numBytes = 0;
+	return B_READ_ONLY_DEVICE;
+}
+
+
+static status_t
+apfs_io(fs_volume* _volume, fs_vnode* _node, void* _cookie,
+	io_request* request)
+{
+	Volume* volume = (Volume*)_volume->private_volume;
+	Inode* inode = (Inode*)_node->private_node;
+
+#ifndef FS_SHELL
+	if (io_request_is_write(request)) {
+		notify_io_request(request, B_READ_ONLY_DEVICE);
+		return B_READ_ONLY_DEVICE;
+	}
+#endif
+
+	if (inode->FileMap() == NULL) {
+#ifndef FS_SHELL
+		notify_io_request(request, B_BAD_VALUE);
+#endif
+		return B_BAD_VALUE;
+	}
+
+	return do_iterative_fd_io(volume->Device(), request,
+		iterative_io_get_vecs_hook, iterative_io_finished_hook, inode);
+}
+
+
 // #pragma mark - Nodes
 
 
@@ -254,11 +405,16 @@ apfs_lookup(fs_volume* _volume, fs_vnode* _directory, const char* name,
 		status = iterator.InitCheck();
 		if (status == B_OK)
 			status = iterator.Lookup(name, &id);
+		if (status == B_ENTRY_NOT_FOUND)
+			entry_cache_add_missing(volume->ID(), directory->ID(), name);
 		if (status != B_OK)
 			return status;
 	}
 
 	*_vnodeID = id;
+	if (strcmp(name, ".") != 0 && strcmp(name, "..") != 0)
+		entry_cache_add(volume->ID(), directory->ID(), name, id);
+
 	void* node;
 	return get_vnode(volume->FSVolume(), id, &node);
 }
@@ -344,7 +500,7 @@ apfs_read(fs_volume* _volume, fs_vnode* _node, void* _cookie, off_t pos,
 		*_length = 0;
 		return B_BAD_VALUE;
 	}
-	return inode->ReadAt(pos, buffer, _length);
+	return inode->Read(pos, buffer, _length);
 }
 
 
@@ -443,13 +599,27 @@ apfs_remove_dir(fs_volume* _volume, fs_vnode* _directory, const char* name)
 }
 
 
-// #pragma mark - Attributes (none until a later milestone)
+// #pragma mark - Attributes
+//
+// macOS extended attributes appear as attributes of type B_RAW_TYPE, with
+// their macOS names. Attributes the file system owns are hidden.
 
 
 static status_t
 apfs_open_attr_dir(fs_volume* _volume, fs_vnode* _node, void** _cookie)
 {
-	*_cookie = NULL;
+	Inode* inode = (Inode*)_node->private_node;
+	AttributeIterator* iterator = new(std::nothrow) AttributeIterator(inode);
+	if (iterator == NULL)
+		return B_NO_MEMORY;
+
+	status_t status = iterator->InitCheck();
+	if (status != B_OK) {
+		delete iterator;
+		return status;
+	}
+
+	*_cookie = iterator;
 	return B_OK;
 }
 
@@ -465,6 +635,7 @@ static status_t
 apfs_free_attr_dir_cookie(fs_volume* _volume, fs_vnode* _node,
 	void* _cookie)
 {
+	delete (AttributeIterator*)_cookie;
 	return B_OK;
 }
 
@@ -473,7 +644,28 @@ static status_t
 apfs_read_attr_dir(fs_volume* _volume, fs_vnode* _node, void* _cookie,
 	struct dirent* buffer, size_t bufferSize, uint32* _num)
 {
+	Volume* volume = (Volume*)_volume->private_volume;
+	Inode* inode = (Inode*)_node->private_node;
+	AttributeIterator* iterator = (AttributeIterator*)_cookie;
+
 	*_num = 0;
+	if (bufferSize <= offsetof(struct dirent, d_name))
+		return B_BUFFER_OVERFLOW;
+
+	size_t length = bufferSize - offsetof(struct dirent, d_name);
+	if (length > B_ATTR_NAME_LENGTH)
+		length = B_ATTR_NAME_LENGTH;
+
+	status_t status = iterator->GetNext(buffer->d_name, &length);
+	if (status == B_ENTRY_NOT_FOUND)
+		return B_OK;
+	if (status != B_OK)
+		return status;
+
+	buffer->d_dev = volume->ID();
+	buffer->d_ino = inode->ID();
+	buffer->d_reclen = offsetof(struct dirent, d_name) + length + 1;
+	*_num = 1;
 	return B_OK;
 }
 
@@ -481,7 +673,7 @@ apfs_read_attr_dir(fs_volume* _volume, fs_vnode* _node, void* _cookie,
 static status_t
 apfs_rewind_attr_dir(fs_volume* _volume, fs_vnode* _node, void* _cookie)
 {
-	return B_OK;
+	return ((AttributeIterator*)_cookie)->Rewind();
 }
 
 
@@ -497,7 +689,27 @@ static status_t
 apfs_open_attr(fs_volume* _volume, fs_vnode* _node, const char* name,
 	int openMode, void** _cookie)
 {
-	return B_ENTRY_NOT_FOUND;
+	if ((openMode & O_RWMASK) != O_RDONLY || (openMode & O_TRUNC) != 0)
+		return B_READ_ONLY_DEVICE;
+
+	Inode* inode = (Inode*)_node->private_node;
+	status_t status = inode->CheckPermissions(R_OK);
+	if (status != B_OK)
+		return status;
+
+	apfs_attribute* attribute
+		= (apfs_attribute*)malloc(sizeof(apfs_attribute));
+	if (attribute == NULL)
+		return B_NO_MEMORY;
+
+	status = inode->FindAttribute(name, attribute);
+	if (status != B_OK) {
+		free(attribute);
+		return status;
+	}
+
+	*_cookie = attribute;
+	return B_OK;
 }
 
 
@@ -511,6 +723,7 @@ apfs_close_attr(fs_volume* _volume, fs_vnode* _node, void* _cookie)
 static status_t
 apfs_free_attr_cookie(fs_volume* _volume, fs_vnode* _node, void* _cookie)
 {
+	free(_cookie);
 	return B_OK;
 }
 
@@ -519,7 +732,9 @@ static status_t
 apfs_read_attr(fs_volume* _volume, fs_vnode* _node, void* _cookie,
 	off_t pos, void* buffer, size_t* _length)
 {
-	return B_ENTRY_NOT_FOUND;
+	Inode* inode = (Inode*)_node->private_node;
+	return inode->ReadAttribute(*(apfs_attribute*)_cookie, pos, buffer,
+		_length);
 }
 
 
@@ -527,6 +742,7 @@ static status_t
 apfs_write_attr(fs_volume* _volume, fs_vnode* _node, void* _cookie,
 	off_t pos, const void* buffer, size_t* _length)
 {
+	*_length = 0;
 	return B_READ_ONLY_DEVICE;
 }
 
@@ -535,7 +751,10 @@ static status_t
 apfs_read_attr_stat(fs_volume* _volume, fs_vnode* _node, void* _cookie,
 	struct stat* stat)
 {
-	return B_ENTRY_NOT_FOUND;
+	apfs_attribute* attribute = (apfs_attribute*)_cookie;
+	stat->st_type = B_RAW_TYPE;
+	stat->st_size = attribute->size;
+	return B_OK;
 }
 
 
@@ -726,15 +945,15 @@ fs_vnode_ops gAPFSVnodeOps = {
 	&apfs_put_vnode,
 	NULL,				// remove_vnode: nothing is ever removed
 
-	// VM file access (milestone 2 adds read_pages and get_file_map)
-	NULL,				// can_page
-	NULL,				// read_pages
-	NULL,				// write_pages
+	// VM file access
+	&apfs_can_page,
+	&apfs_read_pages,
+	&apfs_write_pages,
 
-	NULL,				// io
+	&apfs_io,
 	NULL,				// cancel_io
 
-	NULL,				// get_file_map
+	&apfs_get_file_map,
 
 	&apfs_ioctl,
 	NULL,				// set_flags

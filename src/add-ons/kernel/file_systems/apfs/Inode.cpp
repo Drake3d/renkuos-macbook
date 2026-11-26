@@ -18,6 +18,8 @@
 #include "Container.h"
 #include "Volume.h"
 
+#include <CRCTable.h>
+
 
 // Longest file-system key: a hashed directory entry with a 1023-byte name
 // (10-bit length) after its 12-byte header.
@@ -107,13 +109,19 @@ Inode::Inode(Volume* volume, ino_t id)
 	fModificationTime(0),
 	fChangeTime(0),
 	fAccessTime(0),
-	fReportedCompressed(false)
+	fReportedCompressed(false),
+	fCache(NULL),
+	fMap(NULL)
 {
 }
 
 
 Inode::~Inode()
 {
+	if (fCache != NULL)
+		file_cache_delete(fCache);
+	if (fMap != NULL)
+		file_map_delete(fMap);
 }
 
 
@@ -182,7 +190,113 @@ Inode::Init()
 			fSize = length;
 	}
 
+	// The file cache and file map need the data to be on disk as is, so
+	// compressed files (decmpfs) keep using ReadAt().
+	if (IsFile() && !IsCompressed()) {
+		fCache = file_cache_create(fVolume->ID(), fID, fSize);
+		fMap = file_map_create(fVolume->ID(), fID, fSize);
+		if (fCache == NULL || fMap == NULL)
+			return B_NO_MEMORY;
+	}
+
 	return B_OK;
+}
+
+
+status_t
+Inode::FindExtent(off_t pos, off_t* _diskOffset, off_t* _length)
+{
+	if (pos < 0 || pos >= fSize)
+		return B_BAD_VALUE;
+
+	uint8* key = (uint8*)malloc(kMaxKeyLength);
+	if (key == NULL)
+		return B_NO_MEMORY;
+	MemoryDeleter keyDeleter(key);
+
+	uint32 blockSize = fVolume->BlockSize();
+	off_t remaining = fSize - pos;
+
+	apfs_j_file_extent_key target;
+	target.hdr.Set(fPrivateID, APFS_TYPE_FILE_EXTENT);
+	target.logical_addr = B_HOST_TO_LENDIAN_INT64(pos);
+
+	apfs_j_file_extent_val value;
+	uint16 keyLength = kMaxKeyLength;
+	uint16 valueLength = sizeof(value);
+	status_t status = fVolume->FileSystemTree()->FindLessOrEqual(&target,
+		apfs_compare_file_extent_key, NULL, key, &keyLength, &value,
+		&valueLength);
+	if (status != B_OK && status != B_ENTRY_NOT_FOUND
+		&& status != B_BUFFER_OVERFLOW)
+		return status;
+
+	const apfs_j_file_extent_key* found = (const apfs_j_file_extent_key*)key;
+	if (status == B_OK && keyLength >= sizeof(apfs_j_file_extent_key)
+		&& valueLength >= sizeof(apfs_j_file_extent_val)
+		&& found->hdr.ObjectID() == fPrivateID
+		&& found->hdr.Type() == APFS_TYPE_FILE_EXTENT
+		&& (uint64)pos < found->LogicalAddress() + value.Length()) {
+		uint64 within = pos - found->LogicalAddress();
+		off_t length = value.Length() - within;
+		if (length > remaining)
+			length = remaining;
+
+		if (value.PhysicalBlock() == 0) {
+			// An extent without blocks reads as zeros.
+			*_diskOffset = -1;
+		} else {
+			uint64 block = value.PhysicalBlock() + within / blockSize;
+			if (block + (within % blockSize + length + blockSize - 1)
+					/ blockSize > fVolume->GetContainer().BlockCount()) {
+				ERROR("inode %" B_PRIdINO ": extent outside the container\n",
+					fID);
+				return B_BAD_DATA;
+			}
+			*_diskOffset = (off_t)block * blockSize + within % blockSize;
+		}
+		*_length = length;
+		return B_OK;
+	}
+
+	// A hole: it lasts until the next extent, or to the end of the file.
+	off_t holeLength = remaining;
+	BTreeIterator iterator(fVolume->FileSystemTree());
+	status = iterator.InitCheck();
+	if (status == B_OK)
+		status = iterator.Seek(&target, apfs_compare_file_extent_key, NULL);
+	if (status == B_OK) {
+		const uint8* nextKey;
+		const uint8* nextValue;
+		uint16 nextKeyLength;
+		uint16 nextValueLength;
+		if (iterator.GetNext(&nextKey, &nextKeyLength, &nextValue,
+				&nextValueLength) == B_OK
+			&& nextKeyLength >= sizeof(apfs_j_file_extent_key)) {
+			const apfs_j_file_extent_key* next
+				= (const apfs_j_file_extent_key*)nextKey;
+			if (next->hdr.ObjectID() == fPrivateID
+				&& next->hdr.Type() == APFS_TYPE_FILE_EXTENT
+				&& next->LogicalAddress() > (uint64)pos
+				&& (off_t)(next->LogicalAddress() - pos) < holeLength)
+				holeLength = next->LogicalAddress() - pos;
+		}
+	}
+
+	*_diskOffset = -1;
+	*_length = holeLength;
+	return B_OK;
+}
+
+
+status_t
+Inode::Read(off_t pos, void* buffer, size_t* _length)
+{
+	if (fCache == NULL)
+		return ReadAt(pos, buffer, _length);
+	if (pos < 0)
+		return B_BAD_VALUE;
+	return file_cache_read(fCache, NULL, pos, buffer, _length);
 }
 
 
@@ -240,14 +354,12 @@ Inode::CheckPermissions(int accessMode) const
 status_t
 Inode::ReadAt(off_t pos, void* buffer, size_t* _length)
 {
-	size_t wanted = *_length;
-	*_length = 0;
-
-	if (IsDirectory())
+	if (IsDirectory()) {
+		*_length = 0;
 		return B_IS_A_DIRECTORY;
-	if (pos < 0)
-		return B_BAD_VALUE;
+	}
 	if (IsCompressed()) {
+		*_length = 0;
 		if (!fReportedCompressed) {
 			INFORM("inode %" B_PRIdINO " is compressed; compressed files "
 				"cannot be read yet\n", fID);
@@ -255,12 +367,28 @@ Inode::ReadAt(off_t pos, void* buffer, size_t* _length)
 		}
 		return B_NOT_SUPPORTED;
 	}
-	if (pos >= fSize || wanted == 0)
+	return _ReadStream(fPrivateID, fSize, pos, buffer, _length);
+}
+
+
+/*!	Reads from a data stream: the file extents keyed by streamID (a file's
+	private_id, or a stream-backed attribute's xattr_obj_id).
+*/
+status_t
+Inode::_ReadStream(uint64 streamID, off_t size, off_t pos, void* buffer,
+	size_t* _length)
+{
+	size_t wanted = *_length;
+	*_length = 0;
+
+	if (pos < 0)
+		return B_BAD_VALUE;
+	if (pos >= size || wanted == 0)
 		return B_OK;
 
 	off_t end = pos + wanted;
-	if (end > fSize || end < pos)
-		end = fSize;
+	if (end > size || end < pos)
+		end = size;
 
 	Container& container = fVolume->GetContainer();
 	uint32 blockSize = container.BlockSize();
@@ -286,7 +414,7 @@ Inode::ReadAt(off_t pos, void* buffer, size_t* _length)
 		if (!haveExtent || (uint64)pos < extentStart
 			|| (uint64)pos >= extentStart + extentLength) {
 			apfs_j_file_extent_key target;
-			target.hdr.Set(fPrivateID, APFS_TYPE_FILE_EXTENT);
+			target.hdr.Set(streamID, APFS_TYPE_FILE_EXTENT);
 			target.logical_addr = B_HOST_TO_LENDIAN_INT64(pos);
 
 			apfs_j_file_extent_val value;
@@ -301,7 +429,7 @@ Inode::ReadAt(off_t pos, void* buffer, size_t* _length)
 				&& valueLength >= sizeof(apfs_j_file_extent_val)) {
 				const apfs_j_file_extent_key* found
 					= (const apfs_j_file_extent_key*)key;
-				if (found->hdr.ObjectID() == fPrivateID
+				if (found->hdr.ObjectID() == streamID
 					&& found->hdr.Type() == APFS_TYPE_FILE_EXTENT
 					&& (uint64)pos < found->LogicalAddress() + value.Length()) {
 					haveExtent = true;
@@ -352,6 +480,55 @@ Inode::ReadAt(off_t pos, void* buffer, size_t* _length)
 status_t
 Inode::GetEmbeddedAttribute(const char* name, uint8* data, size_t* _length)
 {
+	apfs_attribute* attribute
+		= (apfs_attribute*)malloc(sizeof(apfs_attribute));
+	if (attribute == NULL)
+		return B_NO_MEMORY;
+	MemoryDeleter attributeDeleter(attribute);
+
+	status_t status = FindAttribute(name, attribute);
+	if (status != B_OK)
+		return status;
+	if (!attribute->embedded)
+		return B_NOT_SUPPORTED;
+	if ((size_t)attribute->size > *_length)
+		return B_BUFFER_OVERFLOW;
+
+	memcpy(data, attribute->data, attribute->size);
+	*_length = attribute->size;
+	return B_OK;
+}
+
+
+status_t
+Inode::ReadAttribute(const apfs_attribute& attribute, off_t pos,
+	void* buffer, size_t* _length)
+{
+	if (!attribute.embedded) {
+		return _ReadStream(attribute.stream_id, attribute.size, pos, buffer,
+			_length);
+	}
+
+	size_t wanted = *_length;
+	*_length = 0;
+	if (pos < 0)
+		return B_BAD_VALUE;
+	if (pos >= attribute.size)
+		return B_OK;
+	if ((off_t)wanted > attribute.size - pos)
+		wanted = attribute.size - pos;
+
+	status_t status = copy_to_buffer(buffer, attribute.data + pos, wanted);
+	if (status != B_OK)
+		return status;
+	*_length = wanted;
+	return B_OK;
+}
+
+
+status_t
+Inode::FindAttribute(const char* name, apfs_attribute* attribute)
+{
 	BTreeIterator iterator(fVolume->FileSystemTree());
 	status_t status = iterator.InitCheck();
 	if (status != B_OK)
@@ -387,18 +564,32 @@ Inode::GetEmbeddedAttribute(const char* name, uint8* data, size_t* _length)
 		const apfs_j_xattr_val* xattr = (const apfs_j_xattr_val*)value;
 		if (value == NULL || valueLength < sizeof(apfs_j_xattr_val))
 			return B_BAD_DATA;
-		if ((xattr->Flags() & APFS_XATTR_DATA_EMBEDDED) == 0)
-			return B_NOT_SUPPORTED;
 
-		size_t length = xattr->DataLength();
-		if (sizeof(apfs_j_xattr_val) + length > valueLength)
-			return B_BAD_DATA;
-		if (length > *_length)
-			return B_BUFFER_OVERFLOW;
+		if ((xattr->Flags() & APFS_XATTR_DATA_EMBEDDED) != 0) {
+			size_t length = xattr->DataLength();
+			if (sizeof(apfs_j_xattr_val) + length > valueLength
+				|| length > sizeof(attribute->data))
+				return B_BAD_DATA;
+			attribute->embedded = true;
+			attribute->stream_id = 0;
+			attribute->size = length;
+			memcpy(attribute->data, xattr->xdata, length);
+			return B_OK;
+		}
 
-		memcpy(data, xattr->xdata, length);
-		*_length = length;
-		return B_OK;
+		if ((xattr->Flags() & APFS_XATTR_DATA_STREAM) != 0) {
+			// xdata holds a j_xattr_dstream_t.
+			apfs_j_xattr_dstream stream;
+			if (sizeof(apfs_j_xattr_val) + sizeof(stream) > valueLength)
+				return B_BAD_DATA;
+			memcpy(&stream, xattr->xdata, sizeof(stream));
+			attribute->embedded = false;
+			attribute->stream_id
+				= B_LENDIAN_TO_HOST_INT64(stream.xattr_obj_id);
+			attribute->size = B_LENDIAN_TO_HOST_INT64(stream.dstream.size);
+			return B_OK;
+		}
+		return B_BAD_DATA;
 	}
 }
 
@@ -437,6 +628,7 @@ DirectoryIterator::DirectoryIterator(Inode* directory)
 	fStatus(B_OK),
 	fLastLength(0),
 	fLastID(0),
+	fLastHash(0),
 	fHaveLast(false),
 	fPending(false)
 {
@@ -538,6 +730,8 @@ DirectoryIterator::_ReadEntry()
 			return B_BAD_DATA;
 		entryName = drec->name;
 		nameLength = drec->NameLength();
+		fLastHash = B_LENDIAN_TO_HOST_INT32(drec->name_len_and_hash)
+			>> APFS_J_DREC_HASH_SHIFT;
 		if (sizeof(apfs_j_drec_hashed_key) + nameLength > keyLength)
 			return B_BAD_DATA;
 	} else {
@@ -571,6 +765,65 @@ DirectoryIterator::_ReadEntry()
 }
 
 
+/*!	The directory-entry name hash for an ASCII name, as macOS computes it.
+	The reference ("j_drec_hashed_key_t") says: NFD-normalize, encode as
+	null-terminated UTF-32, CRC-32C, complement, keep 22 bits. On real
+	volumes the stored hashes match a CRC-32C over the UTF-32 (little
+	endian) code points WITHOUT the terminating null, started at 0xffffffff
+	and not complemented at the end; case-insensitive volumes hash the
+	case-folded name. Checked against every name in the test images,
+	including NFC/NFD, Japanese, emoji and upper-case names.
+	For ASCII, NFD changes nothing and case folding is lowercasing.
+*/
+static uint32
+ascii_name_hash(const char* name, bool fold)
+{
+	uint32 crc = 0xffffffff;
+	for (; *name != '\0'; name++) {
+		uint8 c = (uint8)*name;
+		if (fold && c >= 'A' && c <= 'Z')
+			c += 'a' - 'A';
+		uint8 utf32[4] = { c, 0, 0, 0 };
+		crc = calculate_crc32c(crc, utf32, sizeof(utf32));
+	}
+	return crc & (APFS_J_DREC_HASH_MASK >> APFS_J_DREC_HASH_SHIFT);
+}
+
+
+static bool
+is_ascii(const char* name)
+{
+	for (; *name != '\0'; name++) {
+		if ((uint8)*name >= 0x80)
+			return false;
+	}
+	return true;
+}
+
+
+// Hashed directory keys sort by object id, type, then name_len_and_hash as
+// a number (so by hash, then length); seen in the test images.
+static int
+compare_drec_hashed(const void* _key, uint16 keyLength, const void* _target,
+	void* context)
+{
+	int result = apfs_compare_j_key(_key, sizeof(apfs_j_key), _target,
+		context);
+	if (result != 0)
+		return result;
+	if (keyLength < sizeof(apfs_j_drec_hashed_key))
+		return -1;
+
+	uint32 key = B_LENDIAN_TO_HOST_INT32(
+		((const apfs_j_drec_hashed_key*)_key)->name_len_and_hash);
+	uint32 target = B_LENDIAN_TO_HOST_INT32(
+		((const apfs_j_drec_hashed_key*)_target)->name_len_and_hash);
+	if (key != target)
+		return key < target ? -1 : 1;
+	return 0;
+}
+
+
 static bool
 names_match(const char* a, const char* b, bool ignoreCase)
 {
@@ -600,12 +853,65 @@ DirectoryIterator::Lookup(const char* name, ino_t* _id)
 	if (fStatus != B_OK)
 		return fStatus;
 
+	if (fHashedNames && is_ascii(name))
+		return _LookupHashed(name, _id);
+	return _LookupScan(name, _id);
+}
+
+
+status_t
+DirectoryIterator::_LookupHashed(const char* name, ino_t* _id)
+{
+	bool ignoreCase = !fDirectory->GetVolume()->IsCaseSensitive();
+	uint32 hash = ascii_name_hash(name, ignoreCase);
+
+	apfs_j_drec_hashed_key target;
+	target.hdr.Set(fDirectory->ID(), APFS_TYPE_DIR_REC);
+	target.name_len_and_hash = B_HOST_TO_LENDIAN_INT32(
+		hash << APFS_J_DREC_HASH_SHIFT);
+
+	fHaveLast = false;
+	fPending = false;
+	status_t status = fIterator->Seek(&target, compare_drec_hashed, NULL);
+	if (status != B_OK)
+		return status;
+
+	// Every entry whose name hashes the same comes next; compare those.
+	char entry[B_FILE_NAME_LENGTH];
+	while (true) {
+		size_t length = sizeof(entry);
+		ino_t id;
+		status = GetNext(entry, &length, &id);
+		if (status == B_BUFFER_OVERFLOW) {
+			fPending = false;
+			if (fLastHash != hash)
+				return B_ENTRY_NOT_FOUND;
+			continue;
+		}
+		if (status != B_OK)
+			return status;
+		if (fLastHash != hash)
+			return B_ENTRY_NOT_FOUND;
+
+		if (names_match(entry, name, ignoreCase)) {
+			*_id = id;
+			return B_OK;
+		}
+	}
+}
+
+
+status_t
+DirectoryIterator::_LookupScan(const char* name, ino_t* _id)
+{
 	bool ignoreCase = !fDirectory->GetVolume()->IsCaseSensitive();
 	status_t status = Rewind();
 	if (status != B_OK)
 		return status;
 
-	// A linear scan; milestone 3 replaces it with a hashed search.
+	// Non-ASCII names need Unicode NFD normalization and case folding to
+	// compute their hash, so they are found by scanning. Exact (byte)
+	// matches are found; differently normalized spellings are not yet.
 	char entry[B_FILE_NAME_LENGTH];
 	ino_t caseMatch = -1;
 	while (true) {
@@ -633,4 +939,86 @@ DirectoryIterator::Lookup(const char* name, ino_t* _id)
 		return B_OK;
 	}
 	return status == B_ENTRY_NOT_FOUND ? B_ENTRY_NOT_FOUND : status;
+}
+
+
+// #pragma mark - AttributeIterator
+
+
+AttributeIterator::AttributeIterator(Inode* inode)
+	:
+	fInode(inode),
+	fIterator(NULL),
+	fStatus(B_OK)
+{
+	fIterator = new(std::nothrow) BTreeIterator(
+		inode->GetVolume()->FileSystemTree());
+	if (fIterator == NULL) {
+		fStatus = B_NO_MEMORY;
+		return;
+	}
+	fStatus = fIterator->InitCheck();
+	if (fStatus == B_OK)
+		fStatus = Rewind();
+}
+
+
+AttributeIterator::~AttributeIterator()
+{
+	delete fIterator;
+}
+
+
+status_t
+AttributeIterator::Rewind()
+{
+	apfs_j_key target;
+	target.Set(fInode->ID(), APFS_TYPE_XATTR);
+	return fIterator->Seek(&target, apfs_compare_j_key, NULL);
+}
+
+
+status_t
+AttributeIterator::GetNext(char* name, size_t* _length)
+{
+	if (fStatus != B_OK)
+		return fStatus;
+
+	while (true) {
+		const uint8* key;
+		const uint8* value;
+		uint16 keyLength;
+		uint16 valueLength;
+		status_t status = fIterator->GetNext(&key, &keyLength, &value,
+			&valueLength);
+		if (status != B_OK)
+			return status;
+
+		const apfs_j_xattr_key* xattrKey = (const apfs_j_xattr_key*)key;
+		if (keyLength < sizeof(apfs_j_xattr_key)
+			|| xattrKey->hdr.ObjectID() != (uint64)fInode->ID()
+			|| xattrKey->hdr.Type() != APFS_TYPE_XATTR)
+			return B_ENTRY_NOT_FOUND;
+
+		size_t nameLength = xattrKey->NameLength();
+		if (sizeof(apfs_j_xattr_key) + nameLength > keyLength)
+			return B_BAD_DATA;
+		const apfs_j_xattr_val* xattr = (const apfs_j_xattr_val*)value;
+		if (value != NULL && valueLength >= sizeof(apfs_j_xattr_val)
+			&& (xattr->Flags() & APFS_XATTR_FILE_SYSTEM_OWNED) != 0)
+			continue;
+
+		// The stored length counts the final null.
+		if (nameLength > 0 && xattrKey->name[nameLength - 1] == '\0')
+			nameLength--;
+		if (nameLength + 1 > *_length) {
+			// Longer than an attribute name can be here; skip it.
+			continue;
+		}
+
+		memcpy(name, xattrKey->name, nameLength);
+		name[nameLength] = '\0';
+		*_length = nameLength;
+		return B_OK;
+	}
 }

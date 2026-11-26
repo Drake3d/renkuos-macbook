@@ -20,6 +20,11 @@
 #             file (compressed.txt, ditto --hfsCompression).
 #             Check: copy /myfs out with apfs_shell's "cp -r" and diff it
 #             against stress-src/ (compressed.txt cannot be read yet).
+# attrs.dmg   64 MB, volume "Attrs": tagged.txt with an embedded attribute
+#             (user.small, 11 bytes) and a stream-backed one (user.big,
+#             10000 bytes, over XATTR_MAX_EMBEDDED_SIZE), a symlink whose
+#             target attribute must stay hidden, and, if SYSINFO names a
+#             RenkuOS x86_64 binary, that program (to run it from APFS).
 
 set -e
 
@@ -72,5 +77,20 @@ ln /Volumes/Stress/data.txt /Volumes/Stress/data-link.txt
 seq 1 300000 > compress-me.txt
 ditto --hfsCompression compress-me.txt /Volumes/Stress/compressed.txt
 rm compress-me.txt
+sync
+hdiutil detach "$disk"
+
+hdiutil create -size 64m -fs APFS -volname Attrs -layout NONE attrs.dmg
+disk=$(attach attrs.dmg)
+echo hello > /Volumes/Attrs/tagged.txt
+xattr -w user.small "short value" /Volumes/Attrs/tagged.txt
+xattr -w user.big "$(python3 -c "print('x' * 9999, end='Z')")" \
+	/Volumes/Attrs/tagged.txt
+ln -s tagged.txt /Volumes/Attrs/link
+if [ -n "$SYSINFO" ]; then
+	cp "$SYSINFO" /Volumes/Attrs/sysinfo
+	chmod 755 /Volumes/Attrs/sysinfo
+	xattr -c /Volumes/Attrs/sysinfo
+fi
 sync
 hdiutil detach "$disk"

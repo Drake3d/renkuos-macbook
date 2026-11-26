@@ -29,6 +29,7 @@ public:
 			status_t			Unmount();
 
 			fs_volume*			FSVolume() const { return fFSVolume; }
+			int					Device() const { return fDevice; }
 			dev_t				ID() const { return fFSVolume->id; }
 			Container&			GetContainer() { return fContainer; }
 

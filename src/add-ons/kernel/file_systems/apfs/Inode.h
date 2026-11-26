@@ -13,6 +13,16 @@ class BTreeIterator;
 class Volume;
 
 
+// An extended attribute found by name: its value is either stored in the
+// record (embedded) or in a data stream of its own.
+struct apfs_attribute {
+	bool		embedded;
+	uint64		stream_id;
+	off_t		size;
+	uint8		data[APFS_XATTR_MAX_EMBEDDED_SIZE];
+};
+
+
 // Key comparisons for file-system records ("File-System Objects": object
 // id, then type, then type-specific fields).
 
@@ -74,7 +84,20 @@ public:
 
 			status_t			CheckPermissions(int accessMode) const;
 
-			// buffer may be a userland address.
+			// Regular, uncompressed files are read through the file cache.
+			void*				FileCache() const { return fCache; }
+			void*				FileMap() const { return fMap; }
+
+			// Where file offset pos is on the device: *_diskOffset is a byte
+			// offset on the container's device, or -1 for a hole;
+			// *_length is how far that run goes (not past the file's end).
+			status_t			FindExtent(off_t pos, off_t* _diskOffset,
+									off_t* _length);
+
+			// Reads through the file cache when there is one. buffer may be
+			// a userland address.
+			status_t			Read(off_t pos, void* buffer, size_t* _length);
+			// Reads extent by extent without the file cache.
 			status_t			ReadAt(off_t pos, void* buffer,
 									size_t* _length);
 			status_t			ReadLink(char* buffer, size_t* _bufferSize);
@@ -83,11 +106,20 @@ public:
 			status_t			GetEmbeddedAttribute(const char* name,
 									uint8* data, size_t* _length);
 
+			// Finds an extended attribute, embedded or stream-backed.
+			status_t			FindAttribute(const char* name,
+									apfs_attribute* attribute);
+			// buffer may be a userland address.
+			status_t			ReadAttribute(const apfs_attribute& attribute,
+									off_t pos, void* buffer, size_t* _length);
+
 private:
 	static	void				_ToTimespec(uint64 nanoseconds,
 									struct timespec& time);
 			void				_ParseExtendedFields(const uint8* data,
 									size_t length);
+			status_t			_ReadStream(uint64 streamID, off_t size,
+									off_t pos, void* buffer, size_t* _length);
 
 			Volume*				fVolume;
 			ino_t				fID;
@@ -106,6 +138,8 @@ private:
 			uint64				fChangeTime;
 			uint64				fAccessTime;
 			bool				fReportedCompressed;
+			void*				fCache;
+			void*				fMap;
 };
 
 
@@ -127,11 +161,14 @@ public:
 			status_t			Rewind();
 
 			// Finds an entry by name: exactly, or ignoring ASCII case on a
-			// case-insensitive volume.
+			// case-insensitive volume. ASCII names use the name hash; other
+			// names are found by scanning the directory.
 			status_t			Lookup(const char* name, ino_t* _id);
 
 private:
 			status_t			_ReadEntry();
+			status_t			_LookupHashed(const char* name, ino_t* _id);
+			status_t			_LookupScan(const char* name, ino_t* _id);
 
 			Inode*				fDirectory;
 			BTreeIterator*		fIterator;
@@ -142,8 +179,28 @@ private:
 			char				fLastName[1024];
 			size_t				fLastLength;
 			ino_t				fLastID;
+			uint32				fLastHash;
 			bool				fHaveLast;
 			bool				fPending;
+};
+
+
+// The extended attributes of one node, in on-disk order. Attributes the
+// file system owns (XATTR_FILE_SYSTEM_OWNED, such as a symlink's target)
+// are skipped.
+class AttributeIterator {
+public:
+								AttributeIterator(Inode* inode);
+								~AttributeIterator();
+
+			status_t			InitCheck() const { return fStatus; }
+			status_t			GetNext(char* name, size_t* _length);
+			status_t			Rewind();
+
+private:
+			Inode*				fInode;
+			BTreeIterator*		fIterator;
+			status_t			fStatus;
 };
 
 

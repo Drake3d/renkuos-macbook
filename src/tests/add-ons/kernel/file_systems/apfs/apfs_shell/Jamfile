@@ -45,6 +45,7 @@ local apfsSources =
 	Volume.cpp
 	;
 local sharedSources =
+	crc32.cpp
 	DeviceOpener.cpp
 	;
 

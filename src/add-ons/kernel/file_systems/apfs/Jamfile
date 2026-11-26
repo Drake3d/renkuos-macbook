@@ -3,6 +3,7 @@ SubDir HAIKU_TOP src add-ons kernel file_systems apfs ;
 UsePrivateHeaders [ FDirName kernel util ] ;
 UsePrivateHeaders shared storage file_systems ;
 UsePrivateKernelHeaders ;
+UseHeaders [ FDirName $(HAIKU_TOP) src add-ons kernel file_systems shared ] : true ;
 
 SubDirC++Flags -Wno-multichar ;
 
@@ -16,6 +17,7 @@ local apfsSources =
 	Volume.cpp
 	;
 local sharedSources =
+	crc32.cpp
 	DeviceOpener.cpp
 	;
 
