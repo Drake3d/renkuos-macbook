@@ -92,6 +92,13 @@ APFS test shell (runs the driver on macOS against an image file):
 `objects/darwin/arm64/release/tests/add-ons/kernel/file_systems/apfs/apfs_shell/apfs_shell <image>`
 (`APFS_VOLUME=<index|name>` picks a volume).
 
+Testing a driver on the MacBook: the kernel looks for drivers in
+`/boot/system/add-ons` (from packages) before
+`/boot/system/non-packaged/add-ons`, so once a driver's package is
+installed (images include `apfs.hpkg`), a test copy in `non-packaged` is
+silently ignored and the old driver keeps running. Install the new
+`.hpkg` in `/boot/system/packages` instead, as for Wi-Fi and the camera.
+
 Disk space: `/Volumes/Source` is an 18 GB image and fills up; on
 2026-11-25 builds failed with 112 MB free. Keep large test images
 elsewhere (the APFS ones are on "NEW FAT VOL" in `apfs-test/`).
@@ -201,19 +208,16 @@ them.
    sleep (RenkuOS has no system suspend). For speed tests use
    cdn.kernel.org: Cloudflare's __down sends curl 1 byte and
    speedtest.tele2.net did not answer.
-2. APFS: on 2026-11-26 reading compressed files on comp.dmg gave
-   "Operation not supported" (attributes listed fine) though milestone 4
-   passed; check which apfs.hpkg that boot had and look at its syslog.
-3. CodyCam's Video settings use the generic media theme window; making it
+2. CodyCam's Video settings use the generic media theme window; making it
    look like the Camera prefs needs a CodyCam change, shelved by choice
    (codycam-settings-plan.md).
-4. Camera: sleep and wake (needs system suspend, which RenkuOS lacks).
-5. Speakers sometimes silent until a reboot (seen once): on recurrence,
+3. Camera: sleep and wake (needs system suspend, which RenkuOS lacks).
+4. Speakers sometimes silent until a reboot (seen once): on recurrence,
    try Media preferences > Restart media services and save the syslog.
-6. Microphone is quiet; optional higher default gain.
-7. After the merge, check the internal microphone and the input selector
+5. Microphone is quiet; optional higher default gain.
+6. After the merge, check the internal microphone and the input selector
    (upstream reworked hda mux controls) and display moves on Kaby Lake.
-8. APFS: names typed in a different Unicode normalization than macOS
+7. APFS: names typed in a different Unicode normalization than macOS
    stored (needs NFD and case-folding tables in the kernel); compressed
    files of type 4 (zlib in a classic resource fork, Mac OS X 10.6-10.10,
    refused today); snapshots; FileVault volumes; write support.
