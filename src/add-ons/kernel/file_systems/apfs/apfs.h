@@ -186,6 +186,8 @@ struct apfs_nx_superblock {
 	uint32	DescriptorLength() const
 		{ return B_LENDIAN_TO_HOST_INT32(xp_desc_len); }
 	apfs_oid_t ObjectMap() const { return B_LENDIAN_TO_HOST_INT64(omap_oid); }
+	apfs_oid_t SpaceManager() const
+		{ return B_LENDIAN_TO_HOST_INT64(spaceman_oid); }
 	uint32	MaxFileSystems() const
 		{ return B_LENDIAN_TO_HOST_INT32(max_file_systems); }
 	apfs_oid_t FileSystem(uint32 index) const
@@ -223,6 +225,63 @@ struct apfs_checkpoint_map_phys {
 
 	uint32	Flags() const { return B_LENDIAN_TO_HOST_INT32(flags); }
 	uint32	Count() const { return B_LENDIAN_TO_HOST_INT32(count); }
+} _PACKED;
+
+
+// #pragma mark - Space manager ("Space Manager" chapter)
+
+
+// "spaceman_device_t"
+struct apfs_spaceman_device {
+	uint64	block_count;
+	uint64	chunk_count;
+	uint32	cib_count;
+	uint32	cab_count;
+	uint64	free_count;
+	uint32	addr_offset;
+	uint32	reserved;
+	uint64	reserved2;
+
+	uint64	BlockCount() const { return B_LENDIAN_TO_HOST_INT64(block_count); }
+	uint64	FreeCount() const { return B_LENDIAN_TO_HOST_INT64(free_count); }
+} _PACKED;
+
+// "spaceman_free_queue_t"
+struct apfs_spaceman_free_queue {
+	uint64	count;
+	uint64	tree_oid;
+	uint64	oldest_xid;
+	uint16	tree_node_limit;
+	uint16	pad16;
+	uint32	pad32;
+	uint64	reserved;
+
+	uint64	Count() const { return B_LENDIAN_TO_HOST_INT64(count); }
+} _PACKED;
+
+#define APFS_SFQ_IP						0
+#define APFS_SFQ_MAIN					1
+#define APFS_SFQ_TIER2					2
+
+// "spaceman_phys_t", up to its free queues (sm_dev[SD_MAIN] is the main
+// device)
+struct apfs_spaceman_phys_head {
+	apfs_obj_phys	o;
+	uint32	block_size;
+	uint32	blocks_per_chunk;
+	uint32	chunks_per_cib;
+	uint32	cibs_per_cab;
+	apfs_spaceman_device	dev[2];		// SD_MAIN, SD_TIER2
+	uint32	flags;
+	uint32	ip_bm_tx_multiplier;
+	uint64	ip_block_count;
+	uint32	ip_bm_size_in_blocks;
+	uint32	ip_bm_block_count;
+	int64	ip_bm_base;
+	int64	ip_base;
+	uint64	fs_reserve_block_count;
+	uint64	fs_reserve_alloc_count;
+	apfs_spaceman_free_queue	fq[3];	// SFQ_IP, SFQ_MAIN, SFQ_TIER2
 } _PACKED;
 
 
@@ -727,6 +786,11 @@ static_assert(offsetof(apfs_nx_superblock, omap_oid) == 0xa0,
 	"nx_omap_oid offset");
 static_assert(offsetof(apfs_nx_superblock, fs_oid) == 0xb8,
 	"nx_fs_oid offset");
+static_assert(offsetof(apfs_spaceman_phys_head, dev[0].free_count) == 72,
+	"sm_dev[SD_MAIN].sm_free_count offset");
+static_assert(offsetof(apfs_spaceman_phys_head, fq) == 200, "sm_fq offset");
+static_assert(sizeof(apfs_spaceman_free_queue) == 40,
+	"spaceman_free_queue_t size");
 static_assert(offsetof(apfs_superblock, omap_oid) == 0x80,
 	"apfs_omap_oid offset");
 static_assert(offsetof(apfs_superblock, volname) == 0x2c0,

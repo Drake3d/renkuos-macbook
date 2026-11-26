@@ -185,11 +185,10 @@ apfs_read_fs_info(fs_volume* _volume, struct fs_info* info)
 	info->flags = B_FS_IS_READONLY | B_FS_IS_PERSISTENT | B_FS_HAS_ATTR;
 	info->io_size = APFS_IO_SIZE;
 	info->block_size = container.BlockSize();
-	// Volumes share the container's space; report the container size and
-	// treat everything not allocated to this volume as unknown (free 0) for
-	// now. The space manager is read in a later milestone.
+	// Volumes share the container's space: report the container's size and
+	// its free blocks (as macOS does for each volume).
 	info->total_blocks = container.BlockCount();
-	info->free_blocks = 0;
+	info->free_blocks = container.FreeBlocks();
 
 	strlcpy(info->volume_name, volume->Name(), sizeof(info->volume_name));
 	strlcpy(info->fsh_name, "apfs", sizeof(info->fsh_name));
@@ -479,10 +478,16 @@ apfs_lookup(fs_volume* _volume, fs_vnode* _directory, const char* name,
 		id = directory->ID() == volume->RootID()
 			? volume->RootID() : directory->ParentID();
 	} else {
-		DirectoryIterator iterator(directory);
-		status = iterator.InitCheck();
+		// On the heap: kernel stacks are small and the iterator holds a
+		// name buffer.
+		DirectoryIterator* iterator
+			= new(std::nothrow) DirectoryIterator(directory);
+		if (iterator == NULL)
+			return B_NO_MEMORY;
+		ObjectDeleter<DirectoryIterator> iteratorDeleter(iterator);
+		status = iterator->InitCheck();
 		if (status == B_OK)
-			status = iterator.Lookup(name, &id);
+			status = iterator->Lookup(name, &id);
 		if (status == B_ENTRY_NOT_FOUND)
 			entry_cache_add_missing(volume->ID(), directory->ID(), name);
 		if (status != B_OK)

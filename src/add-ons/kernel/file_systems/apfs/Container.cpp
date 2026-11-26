@@ -24,7 +24,8 @@ Container::Container()
 	fBlockCache(NULL),
 	fMappings(NULL),
 	fMappingCount(0),
-	fObjectMap(NULL)
+	fObjectMap(NULL),
+	fFreeBlocks(0)
 {
 	memset(&fSuperBlock, 0, sizeof(fSuperBlock));
 }
@@ -123,6 +124,8 @@ Container::Open(int device, off_t deviceSize, bool useBlockCache)
 		ERROR("cannot read the container object map: %s\n", strerror(status));
 		return status;
 	}
+
+	_ReadFreeBlocks();
 
 	TRACE("container: block size %" B_PRIu32 ", %" B_PRIu64 " blocks, "
 		"checkpoint xid %" B_PRIu64 ", %" B_PRIu32 " ephemeral objects\n",
@@ -272,6 +275,52 @@ Container::GetVolumeInfo(uint32 index, apfs_volume_info* info)
 	info->incompatible_features = volume->IncompatibleFeatures();
 	info->flags = volume->Flags();
 	return B_OK;
+}
+
+
+/*!	The space manager ("spaceman_phys_t") is an ephemeral object of the
+	checkpoint. Free space as macOS reports it ("Container Free Space") is
+	sm_dev[SD_MAIN].sm_free_count plus the blocks waiting in the main free
+	queue (sm_fq[SFQ_MAIN].sfq_count); checked on every test image.
+	Only the start of the object is needed. A space manager larger than a
+	block cannot be checksummed from its first block alone, so then the
+	count is used only if it is plausible.
+*/
+void
+Container::_ReadFreeBlocks()
+{
+	fFreeBlocks = 0;
+
+	apfs_paddr_t address;
+	if (ResolveEphemeral(fSuperBlock.SpaceManager(), &address) != B_OK)
+		return;
+
+	uint32 objectSize = fBlockSize;
+	for (uint32 i = 0; i < fMappingCount; i++) {
+		if (fMappings[i].ObjectID() == fSuperBlock.SpaceManager())
+			objectSize = fMappings[i].Size();
+	}
+
+	uint8* block = (uint8*)malloc(fBlockSize);
+	if (block == NULL)
+		return;
+	MemoryDeleter blockDeleter(block);
+
+	status_t status = objectSize == fBlockSize
+		? ReadObject(address, block, APFS_OBJECT_TYPE_SPACEMAN)
+		: ReadBlock(address, block);
+	if (status != B_OK)
+		return;
+
+	const apfs_spaceman_phys_head* spaceman
+		= (const apfs_spaceman_phys_head*)block;
+	if (spaceman->o.Type() != APFS_OBJECT_TYPE_SPACEMAN)
+		return;
+
+	uint64 free = spaceman->dev[0].FreeCount()
+		+ spaceman->fq[APFS_SFQ_MAIN].Count();
+	if (free <= BlockCount())
+		fFreeBlocks = free;
 }
 
 

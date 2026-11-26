@@ -187,10 +187,14 @@ Inode::Init()
 		fSize = B_LENDIAN_TO_HOST_INT64(inode->uncompressed_size);
 
 	if (IsSymlink()) {
-		char target[B_PATH_NAME_LENGTH];
-		size_t length = sizeof(target);
+		// The size of a symlink is the length of its target.
+		char* target = (char*)malloc(B_PATH_NAME_LENGTH);
+		if (target == NULL)
+			return B_NO_MEMORY;
+		size_t length = B_PATH_NAME_LENGTH;
 		if (ReadLink(target, &length) == B_OK)
 			fSize = length;
+		free(target);
 	}
 
 	// Compressed files (decmpfs): the size is in their compression header;
@@ -634,8 +638,11 @@ Inode::ReadLink(char* buffer, size_t* _bufferSize)
 		return B_BAD_VALUE;
 
 	// The target is the SYMLINK_EA_NAME attribute: a null-terminated path.
-	char target[B_PATH_NAME_LENGTH + 1];
-	size_t length = sizeof(target) - 1;
+	char* target = (char*)malloc(B_PATH_NAME_LENGTH + 1);
+	if (target == NULL)
+		return B_NO_MEMORY;
+	MemoryDeleter targetDeleter(target);
+	size_t length = B_PATH_NAME_LENGTH;
 	status_t status = GetEmbeddedAttribute(APFS_SYMLINK_EA_NAME,
 		(uint8*)target, &length);
 	if (status != B_OK)

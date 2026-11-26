@@ -44,6 +44,9 @@ public:
 			const apfs_nx_superblock& SuperBlock() const
 									{ return fSuperBlock; }
 			ObjectMap*			GetObjectMap() const { return fObjectMap; }
+			// Free blocks of the container (shared by all its volumes), from
+			// the space manager; 0 if it could not be read.
+			uint64				FreeBlocks() const { return fFreeBlocks; }
 
 			// Reads one block into buffer (BlockSize() bytes).
 			status_t			ReadBlock(apfs_paddr_t block, void* buffer);
@@ -73,6 +76,7 @@ private:
 									const apfs_nx_superblock& blockZero);
 			status_t			_LoadCheckpointMaps(
 									const apfs_nx_superblock& superBlock);
+			void				_ReadFreeBlocks();
 			bool				_IsValidSuperBlock(
 									const apfs_nx_superblock* superBlock,
 									bool checkpoint) const;
@@ -88,6 +92,7 @@ private:
 			uint32				fMappingCount;
 
 			ObjectMap*			fObjectMap;
+			uint64				fFreeBlocks;
 };
 
 
