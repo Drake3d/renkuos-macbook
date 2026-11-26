@@ -10,8 +10,9 @@ camera work and the built-in Wi-Fi).
 - Code: github.com/Drake3d/renkuos-macbook.
   - `wifi` (work here): `apfs` plus 3 camera commits (settings kept across
     restarts, idle power-down, picture sizes/mirror/CodyCam settings) and
-    4 Wi-Fi commits. Tip: `419c2da7d4` "brcmfmac: real link rate and
-    signal, receive drop warning". Pushed 2026-11-26.
+    4 Wi-Fi commits, then the microphone gain commit. Tip: `e707a92fb1`
+    "hda: cs8409: start the internal microphones at +9 dB". Pushed
+    2026-11-26.
   - `apfs`: `apple-spi-input` plus the APFS driver, milestones 1-5
     (`personal/apfs` tip `8d6d75b8a4`). The 3 camera commits sit on the
     local `apfs` too but were pushed only as part of `wifi`.
@@ -98,6 +99,12 @@ Testing a driver on the MacBook: the kernel looks for drivers in
 installed (images include `apfs.hpkg`), a test copy in `non-packaged` is
 silently ignored and the old driver keeps running. Install the new
 `.hpkg` in `/boot/system/packages` instead, as for Wi-Fi and the camera.
+A driver inside the `haiku` package itself (such as `hda`) has no package
+of its own: hide the packaged one with a `/boot/system/settings/packages`
+file (`Package haiku { BlockedEntries { add-ons/kernel/drivers/bin/hda
+add-ons/kernel/drivers/dev/audio/hmulti/hda } }`), put the test copy in
+`non-packaged/add-ons/kernel/drivers/bin/` with the `dev/audio/hmulti/`
+symlink to it, and reboot; remove all three to go back.
 
 ### Other architectures (built 2026-11-26)
 
@@ -241,9 +248,13 @@ them.
 3. Camera: sleep and wake (needs system suspend, which RenkuOS lacks).
 4. Speakers sometimes silent until a reboot (seen once): on recurrence,
    try Media preferences > Restart media services and save the syslog.
-5. Microphone is quiet; optional higher default gain.
-6. After the merge, check the internal microphone and the input selector
-   (upstream reworked hda mux controls) and display moves on Kaby Lake.
+5. After the merge, check the input selector (upstream reworked hda mux
+   controls) and display moves on Kaby Lake. The internal microphone
+   records fine on the merged tree (2026-11-26).
+6. The MacBook still runs the test hda from `hda-mic-test` (a copy in
+   non-packaged plus `/boot/system/settings/packages` hiding the haiku
+   package's hda). Run its `uninstall.sh` and reboot when an image with
+   `e707a92fb1` is installed.
 7. APFS: names typed in a different Unicode normalization than macOS
    stored (needs NFD and case-folding tables in the kernel); compressed
    files of type 4 (zlib in a classic resource fork, Mac OS X 10.6-10.10,

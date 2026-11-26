@@ -181,3 +181,15 @@ so a failed boot can be read from the syslog.
 - The GPIO masks for 106b:3300 (0x0f?) and the meaning of the 0xd/0xf arguments.
 - How Haiku's `hda_multi_audio` channel layout maps to the 4-channel TDM
   stream.
+
+## 8. Microphone gain (2026-11-26, `e707a92fb1`)
+
+- Pin 0x44 boost: 0, 10 or 20 dB; the driver uses 20 (`apple_mic_boost`).
+- Converter 0x22 input amplifier: -51 to +12 dB in 1 dB steps (offset 51,
+  63 steps), read from the chip. The generic code leaves it on 0 dB; the
+  driver now starts it at +9 dB (`apple_mic_gain <dB>` in hda.settings).
+- Speech recorded at normal distance: quiet at +3 dB, good but a little
+  loud at +12 dB, hence +9 dB.
+- The media server saves the mixer's recording gain
+  (`Media/multi_audio_settings`) and sets it again at start-up, after the
+  driver, so a saved slider position wins over the driver's default.
