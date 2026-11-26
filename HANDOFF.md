@@ -1,19 +1,24 @@
 # RenkuOS on the MacBookPro14,1: handoff
 
-Last updated 2026-11-25. Read this first when continuing on another
+Last updated 2026-11-26. Read this first when continuing on another
 computer. This branch (`notes`) holds only notes; the code is on the
-`apfs` branch of this repository (everything on `apple-spi-input`, plus the
-APFS driver).
+`wifi` branch of this repository (everything on `apfs`, plus the newer
+camera work and the built-in Wi-Fi).
 
 ## Where things are
 
 - Code: github.com/Drake3d/renkuos-macbook.
-  - `apfs` (work here): `apple-spi-input` plus the APFS driver, milestones
-    1-5. Local tip: `8d6d75b8a4` "apfs: milestone 5, package, free space and
-    hardening". Push it before switching computers (`git push` on `apfs`);
-    on 2026-11-25 `personal/apfs` still had only milestone 1.
-  - `apple-spi-input`: everything before APFS. Tip: `24f9dc8e84` "Merge
-    RenkuOS main into apple-spi-input" (RenkuOS `main` at `7b0177e735`).
+  - `wifi` (work here): `apfs` plus 3 camera commits (settings kept across
+    restarts, idle power-down, picture sizes/mirror/CodyCam settings) and
+    2 Wi-Fi commits. Tip: `10961cdba7` "brcmfmac: PCIe data path; the
+    BCM4350 joins networks". Pushed 2026-11-26.
+  - `apfs`: `apple-spi-input` plus the APFS driver, milestones 1-5
+    (`personal/apfs` tip `8d6d75b8a4`). The 3 camera commits sit on the
+    local `apfs` too but were pushed only as part of `wifi`.
+  - `apple-spi-input`: everything before APFS; on GitHub `apfs` was merged
+    into it (`9ad3016a27`, pull request #1 on the personal repository).
+    Before that its tip was `24f9dc8e84` "Merge RenkuOS main into
+    apple-spi-input" (RenkuOS `main` at `7b0177e735`).
 - Remotes in a working clone:
   - `origin` = https://github.com/RenkuOS/Source.git (read only for us)
   - `personal` = https://github.com/Drake3d/renkuos-macbook.git
@@ -25,7 +30,7 @@ git clone https://github.com/RenkuOS/Source.git
 cd Source
 git remote add personal https://github.com/Drake3d/renkuos-macbook.git
 git fetch personal
-git switch -c apfs --track personal/apfs
+git switch -c wifi --track personal/wifi
 ```
 
 Then create `build/jam/UserBuildConfig` (git-ignored). It puts every
@@ -40,6 +45,7 @@ local personalPackages =
 	AppleSPIInput	# MacBook SPI keyboard and trackpad, media and volume keys
 	FaceTimeHD		# FaceTime HD camera: driver, media add-on, Camera prefs
 	APFS			# read-only Apple File System driver
+	BroadcomWifi	# BCM4350 PCIe Wi-Fi
 	;
 AddOptionalHaikuImagePackages $(personalPackages) ;
 
@@ -56,6 +62,20 @@ if $(fthdFirmware) && $(fthdSetFile) {
 	Echo "UserBuildConfig: FaceTime HD firmware not found in"
 		"$(fthdWorking); the image will not include it." ;
 }
+
+# Broadcom's BCM4350 Wi-Fi firmware from a linux-firmware checkout, for
+# personal test images only; never committed. Set RENKU_LINUX_FIRMWARE if
+# the checkout is not /Volumes/Source/linux-firmware.
+local linuxFirmware = $(RENKU_LINUX_FIRMWARE:E=/Volumes/Source/linux-firmware) ;
+local brcmFirmware = [ Glob $(linuxFirmware)/brcm
+	: brcmfmac4350c2-pcie.bin brcmfmac4350-pcie.bin ] ;
+if $(brcmFirmware) {
+	AddFilesToHaikuImage system non-packaged data firmware brcm
+		: $(brcmFirmware) ;
+} else {
+	Echo "UserBuildConfig: BCM4350 Wi-Fi firmware not found in"
+		"$(linuxFirmware)/brcm; the image will not include it." ;
+}
 ```
 
 Already part of every image without a setting: the CS8409 sound (hda),
@@ -65,7 +85,8 @@ camera files found, a freshly installed image has a working camera
 
 Configure and build as usual for Haiku (x86_64), in `generated.x86_64`:
 `jam -q -j<cores> @nightly-anyboot`, or single targets such as
-`facetimehd.hpkg`, `apple_spi_input.hpkg`, `apfs.hpkg`, `apfs`, `hda`.
+`facetimehd.hpkg`, `apple_spi_input.hpkg`, `apfs.hpkg`,
+`broadcom_wifi.hpkg`, `apfs`, `hda`.
 APFS test shell (runs the driver on macOS against an image file):
 `jam -q '<build>apfs_shell'`, then
 `objects/darwin/arm64/release/tests/add-ons/kernel/file_systems/apfs/apfs_shell/apfs_shell <image>`
@@ -88,7 +109,7 @@ Done once on 2026-11-25 by merging (not rebasing, so pushed history stays):
 ```
 git fetch origin
 git branch -f main origin/main
-git switch apfs
+git switch wifi
 git merge --no-ff origin/main
 ```
 
@@ -107,7 +128,9 @@ Build, test the nightly on the MacBook, then commit the merge.
   `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 - Never commit Apple or Broadcom firmware; the user supplies it.
 - New code is MIT with SPDX lines. Linux drivers (GPL) are used for facts
-  only, never code; each file names its sources.
+  only, never code; each file names its sources. Exception: the new
+  brcmfmac PCIe files follow OpenBSD's bwfm(4) closely and carry its ISC
+  notices, like the rest of that driver.
 - The user handles their own logins.
 - Testing: the user boots the nightly ISO (or installs a new .hpkg into
   /boot/system/packages and reboots) and sends the syslog via the FAT
@@ -122,7 +145,12 @@ Build, test the nightly on the MacBook, then commit the merge.
 - hda (CS8409): speakers, headphone jack, internal microphones.
 - FaceTime HD camera (5 commits): driver `facetimehd`, test tool
   `facetimehd_capture`, media add-on (CodyCam works, ~30 fps), Camera
-  preferences app (built, NOT yet tested), package `facetimehd.hpkg`.
+  preferences app, package `facetimehd.hpkg`.
+- Camera, 3 more commits (on `wifi`): picture settings kept across
+  restarts (~/config/settings/kernel/drivers/facetimehd); camera powered
+  down 15 s after use; any even picture size up to 1280x720 (tested
+  64x48 to 1280x720 at 30 fps), Mirror and Picture size settings, and
+  CodyCam's Video settings with the same controls as the Camera prefs.
 - Merged RenkuOS `main` (711 commits) on 2026-11-25; nightly tested on
   the MacBook, including a fresh install with the camera files built in.
 - APFS, read-only (branch `apfs`, 5 commits; see apfs-readonly-design.md):
@@ -130,6 +158,11 @@ Build, test the nightly on the MacBook, then commit the merge.
   attributes, compressed files (LZVN, LZFSE, zlib), programs run from
   APFS, free space as macOS reports it; package `apfs.hpkg` (optional
   image package APFS). Tested on images and on two 4 TB macOS SSDs.
+- Built-in Wi-Fi, BCM4350 (branch `wifi`, 2 commits; see
+  wifi-bcm4350-plan.md): the brcmfmac driver gained a PCIe side (firmware
+  start, msgbuf rings on MSI, data path) under its existing Wi-Fi logic.
+  Joined a WPA2 network, DHCP, ping with no loss. Package
+  `broadcom_wifi.hpkg` (optional image package BroadcomWifi).
 
 ## Camera: files the user must supply
 
@@ -147,19 +180,33 @@ again after reflashing. Never commit them.
   WindowsSupport.dmg, AppleCamera64.exe (solid RAR, needs `unar`);
   `dd bs=1 skip=1937824 count=18652`.
 
+## Wi-Fi: files the user must supply
+
+`brcmfmac4350c2-pcie.bin` (608 KB; the MacBook's chip is revision 5) and,
+for later chip revisions, `brcmfmac4350-pcie.bin`, from linux-firmware
+(`brcm/`), go in `/boot/system/non-packaged/data/firmware/brcm/`. The
+UserBuildConfig block above puts them into personal images. Never commit
+them.
+
 ## Open items
 
-1. Test the Camera preferences app (Deskbar > Preferences > Camera).
-2. Keep camera settings across restarts (they reset on reboot today).
-3. Power the camera's processor and sensor down when idle.
-4. Camera: sleep and wake; resolutions other than 1280x720.
+1. Wi-Fi: check scanning (`ifconfig /dev/net/brcmfmac/0 scan`, then
+   `list`, or Network preferences); reopen the flow ring after joining
+   another network; TX priorities (all at 0 today); build for arm64 and
+   move the SDIO chip code onto brcmf_chip.cpp.
+2. APFS: on 2026-11-26 reading compressed files on comp.dmg gave
+   "Operation not supported" (attributes listed fine) though milestone 4
+   passed; check which apfs.hpkg that boot had and look at its syslog.
+3. CodyCam's Video settings use the generic media theme window; making it
+   look like the Camera prefs needs a CodyCam change, shelved by choice
+   (codycam-settings-plan.md).
+4. Camera: sleep and wake (needs system suspend, which RenkuOS lacks).
 5. Speakers sometimes silent until a reboot (seen once): on recurrence,
    try Media preferences > Restart media services and save the syslog.
 6. Microphone is quiet; optional higher default gain.
-7. Wi-Fi (BCM4350): researched only, on hold; see wifi-bcm4350-plan.md.
-8. After the merge, check the internal microphone and the input selector
+7. After the merge, check the internal microphone and the input selector
    (upstream reworked hda mux controls) and display moves on Kaby Lake.
-9. APFS: names typed in a different Unicode normalization than macOS
+8. APFS: names typed in a different Unicode normalization than macOS
    stored (needs NFD and case-folding tables in the kernel); compressed
    files of type 4 (zlib in a classic resource fork, Mac OS X 10.6-10.10,
    refused today); snapshots; FileVault volumes; write support.
@@ -168,7 +215,8 @@ again after reflashing. Never commit them.
 
 - camera-facetimehd-design.md: camera hardware, sources, phase results.
 - sound-cs8409-design.md: CS8409 audio design and provenance.
-- wifi-bcm4350-plan.md: Wi-Fi plan (on hold).
+- wifi-bcm4350-plan.md: Wi-Fi plan and the result of each phase.
+- codycam-settings-plan.md: shelved plan for CodyCam's settings window.
 - apfs-readonly-design.md: APFS driver design, results, and the places
   where real volumes differ from Apple's reference.
 

@@ -1,6 +1,23 @@
-# MacBookPro14,1 Wi-Fi: BCM4350 plan (on hold)
+# MacBookPro14,1 Wi-Fi: BCM4350 plan (in progress)
 
-Status: researched only, nothing written. User chose "Not now" on 2026-11-07.
+Status: phase 1 done and tested on the MacBook 2026-11-26 (not committed yet).
+Chip BCM4350 rev 5, PCIe core rev 11, CR4 rev 6, RAM 768 KB at 0x180000;
+firmware brcmfmac4350c2-pcie.bin (7.35.180.133) copied in 364 ms, running
+after 515 ms; shared area version 5, flags 0x20005 (no DMA indices), max
+255 RX buffers, firmware console readable. Code: brcmf_chip.cpp,
+brcmf_pcie.cpp, PCI attach in driver.cpp, package BroadcomWifi.
+Phase 2 done and tested 2026-11-26 (not committed): brcmf_pcie_msgbuf.cpp,
+five common rings in host memory, 42 submission / 40 flow / 3 completion
+rings, MSI interrupt (vector 27), cur_etheraddr and "ver" iovars answered
+in about 1.3 ms, 2 interrupts and nothing found by polling.
+Committed as 6d6e54bbb9 on branch wifi (phases 1+2).
+Phase 3 tested 2026-11-26, committed as 10961cdba7: Brcmf runs over BrcmfTransport;
+brcmf_pcie_data.cpp (255 RX buffers, one flow ring, TX copy buffers).
+Joined a WPA2-PSK/CCMP network with the host supplicant (wpa_supplicant),
+keys installed, DHCP address, ping 12-32 ms, 0% loss. "ifconfig list"
+was empty because nothing had started a scan ("ifconfig scan" not tried
+yet). Open: scan check, flow ring not reopened on a new network, all
+traffic at priority 0.
 
 ## Hardware (from the MacBook syslog)
 - Built-in card: Broadcom **BCM4350** 802.11ac, PCI `14e4:43a3`, revision 05,
