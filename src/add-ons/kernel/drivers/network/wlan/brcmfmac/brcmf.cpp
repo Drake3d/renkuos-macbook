@@ -150,12 +150,15 @@ static const size_t kMaxDcmdPayload = 8192;
 enum {
 	C_UP					= 2,
 	C_SET_PROMISC			= 10,
+	C_GET_RATE				= 12,
 	C_SET_INFRA				= 20,
 	C_GET_BSSID				= 23,
 	C_SET_SSID				= 26,
+	C_GET_CHANNEL			= 29,
 	C_SET_PASSIVE_SCAN		= 49,
 	C_DISASSOC				= 52,
 	C_SET_PM				= 86,
+	C_GET_RSSI				= 127,
 	C_SET_SCAN_CHANNEL_TIME	= 185,
 	C_SET_SCAN_UNASSOC_TIME	= 187,
 	C_GET_VAR				= 262,
@@ -304,6 +307,10 @@ Brcmf::Brcmf(SdioHost* host, BrcmfTransport* transport)
 	fKeyed(false),
 	fSsidLength(0),
 	fRssi(0),
+	fRate(0),
+	fChannel(0),
+	fLinkInfoLogged(false),
+	fRxDropped(0),
 	fScanVersion(0),
 	fHasFirmwareSupplicant(false),
 	fScanning(false),
@@ -1311,8 +1318,15 @@ Brcmf::_HandleData(uint8* data, size_t length)
 
 	if (queued)
 		fRxCondition.NotifyAll();
-	else
+	else {
 		gBufferModule->free(buffer);
+		// the network stack does not read fast enough
+		int32 dropped = atomic_add(&fRxDropped, 1) + 1;
+		if (dropped == 1 || dropped % 1000 == 0) {
+			INFO("receive queue full, %" B_PRId32 " frames dropped so far\n",
+				dropped);
+		}
+	}
 }
 
 
@@ -1683,6 +1697,56 @@ Brcmf::_InitFirmware()
 }
 
 
+/*!	Asks the firmware for the link rate, signal strength and channel of the
+	current connection. Logs them once per connection. Not to be called
+	from event handling (it waits for the firmware).
+*/
+status_t
+Brcmf::UpdateLinkInfo()
+{
+	if (!fRunning || !fLinkUp)
+		return B_DEV_NOT_READY;
+
+	uint8 value[4] = {};
+	if (_Dcmd(C_GET_RATE, false, value, sizeof(value), NULL) == B_OK)
+		fRate = get32(value);
+			// in 500 kbit/s units
+
+	// scb_val: a signed value, then a MAC address (zero: the AP)
+	uint8 scb[10] = {};
+	int32 rssi = 0;
+	if (_Dcmd(C_GET_RSSI, false, scb, sizeof(scb), NULL) == B_OK)
+		rssi = (int32)get32(scb);
+	if (rssi >= 0) {
+		// Right after joining the firmware may not have heard a beacon
+		// yet; the last scan saw the access point.
+		MutexLocker locker(fStateLock);
+		for (int32 i = 0; i < fScanCount; i++) {
+			if (memcmp(fScanResults[i]->bssid, fBssid, 6) == 0) {
+				rssi = fScanResults[i]->rssi;
+				break;
+			}
+		}
+	}
+	if (rssi < 0)
+		fRssi = rssi;
+
+	// channel_info: hardware, target and scan channel
+	uint8 channel[12] = {};
+	if (_Dcmd(C_GET_CHANNEL, false, channel, sizeof(channel), NULL) == B_OK)
+		fChannel = get32(channel);
+
+	if (!fLinkInfoLogged && fChannel != 0) {
+		fLinkInfoLogged = true;
+		INFO("connected on channel %" B_PRIu32 " (%s), signal %" B_PRId32
+			" dBm, rate %" B_PRIu32 ".%u Mbit/s\n", fChannel,
+			fChannel > 14 ? "5 GHz" : "2.4 GHz", fRssi, fRate / 2,
+			(fRate & 1) != 0 ? 5 : 0);
+	}
+	return B_OK;
+}
+
+
 void
 Brcmf::SetPromiscuous(bool enable)
 {
@@ -1715,6 +1779,7 @@ Brcmf::_SetLink(bool up)
 	if (fLinkUp == up)
 		return;
 	fLinkUp = up;
+	fLinkInfoLogged = false;
 	INFO("link %s\n", up ? "up" : "down");
 	if (!up && fTransport != NULL)
 		fTransport->TransportLinkDown();

@@ -519,6 +519,13 @@ brcmf_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 				state.media |= IFM_ACTIVE;
 				state.quality = 1000;
 				state.speed = 72000000;
+				if (brcmf->UpdateLinkInfo() == B_OK) {
+					// quality in 1/10 %, from -100 dBm (0) to -50 dBm (100 %)
+					int32 percent = 2 * (brcmf->Rssi() + 100);
+					state.quality = max_c(0, min_c(percent, 100)) * 10;
+					if (brcmf->RateKbps() != 0)
+						state.speed = (uint64)brcmf->RateKbps() * 1000;
+				}
 			} else {
 				state.quality = 0;
 				state.speed = 0;

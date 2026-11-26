@@ -216,6 +216,8 @@ public:
 			const uint8*		Ssid() const { return fSsid; }
 			uint8				SsidLength() const { return fSsidLength; }
 			int32				Rssi() const { return fRssi; }
+			uint32				RateKbps() const { return fRate * 500; }
+			status_t			UpdateLinkInfo();
 			bool				HasFirmwareSupplicant() const
 									{ return fHasFirmwareSupplicant; }
 
@@ -340,6 +342,10 @@ private:
 			uint8				fSsid[32];
 			uint8				fSsidLength;
 			int32				fRssi;
+			uint32				fRate;
+			uint32				fChannel;
+			bool				fLinkInfoLogged;
+			int32				fRxDropped;
 			uint32				fScanVersion;
 			bool				fHasFirmwareSupplicant;
 			bool				fScanning;

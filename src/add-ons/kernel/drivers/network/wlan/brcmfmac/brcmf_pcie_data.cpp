@@ -304,9 +304,21 @@ BrcmfPcie::_HandleRxComplete(const uint8* message)
 	uint32 offset = complete->data_offset != 0
 		? complete->data_offset : fRxDataOffset;
 	uint32 length = complete->data_length;
+	if (length > 1000)
+		atomic_add(&fRxLarge, 1);
+	if ((int32)length > fRxMaxLength)
+		fRxMaxLength = length;
+	if ((fRxFlagsSeen & (1u << (complete->flags & 31))) == 0) {
+		fRxFlagsSeen |= 1u << (complete->flags & 31);
+		TRACE("first RX frame with flags %#x: %" B_PRIu32 " bytes at offset %"
+			B_PRIu32 ", metadata %u, status %#" B_PRIx32 "/%#" B_PRIx32 "\n",
+			complete->flags, length, offset, complete->metadata_length,
+			complete->status0, complete->status1);
+	}
 	if (offset + length <= BRCMF_PCIE_FRAME_SIZE && fReceiver != NULL) {
 		fReceiver->ReceiveData(fRxPool.Data(index) + offset, length);
 		atomic_add(&fRxFrames, 1);
+		atomic_add64(&fRxBytes, length);
 	} else if (offset + length > BRCMF_PCIE_FRAME_SIZE) {
 		ERROR("RX frame of %" B_PRIu32 " bytes at %" B_PRIu32
 			" does not fit\n", length, offset);
@@ -600,6 +612,7 @@ BrcmfPcie::TransportSend(net_buffer* buffer)
 	locker.Unlock();
 
 	atomic_add(&fTxFrames, 1);
+	atomic_add64(&fTxBytes, size);
 	gBufferModule->free(buffer);
 	return B_OK;
 }

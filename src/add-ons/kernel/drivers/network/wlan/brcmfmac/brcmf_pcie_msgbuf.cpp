@@ -72,6 +72,7 @@ static const size_t kControlBufferSize = 8192;	// MSGBUF_MAX_CTL_PKT_SIZE
 static const uint32 kIoctlRequestId = 0xfffe;	// MSGBUF_IOCTL_REQ_PKTID
 static const bigtime_t kIoctlTimeout = 2000000;
 static const bigtime_t kPollInterval = 100000;
+static const bigtime_t kTrafficLogInterval = 60000000;
 
 // dcmds
 static const uint32 kDcmdGetVar = 262;
@@ -577,7 +578,53 @@ BrcmfPcie::_ServiceLoop()
 			_EnableInterrupts(true);
 		else
 			_DumpConsole();
+
+		if (system_time() - fLastTrafficLog >= kTrafficLogInterval)
+			_LogTraffic();
 	}
+}
+
+
+/*!	Once a minute while frames flow: what went through and how fast, and
+	how many buffers the firmware holds. Logged with TRACE_BRCMFMAC only.
+*/
+void
+BrcmfPcie::_LogTraffic()
+{
+#ifdef TRACE_BRCMFMAC
+	bigtime_t now = system_time();
+	bigtime_t elapsed = now - fLastTrafficLog;
+	fLastTrafficLog = now;
+
+	int32 rxFrames = atomic_get(&fRxFrames);
+	int32 txFrames = atomic_get(&fTxFrames);
+	int32 txFailed = atomic_get(&fTxFailed);
+	int64 rxBytes = atomic_get64(&fRxBytes);
+	int64 txBytes = atomic_get64(&fTxBytes);
+	int32 rxLarge = atomic_get(&fRxLarge);
+	if (rxFrames == fLoggedRxFrames && txFrames == fLoggedTxFrames)
+		return;
+
+	int64 rxRate = (rxBytes - fLoggedRxBytes) * 8 * 1000 / elapsed;
+	int64 txRate = (txBytes - fLoggedTxBytes) * 8 * 1000 / elapsed;
+		// kbit/s
+	TRACE("traffic in %" B_PRId64 " s: RX %" B_PRId32 " frames (%" B_PRId64
+		".%" B_PRId64 " Mbit/s), TX %" B_PRId32 " frames (%" B_PRId64 ".%"
+		B_PRId64 " Mbit/s), %" B_PRId32 " TX failed; RX buffers posted %"
+		B_PRId32 ", TX in flight %" B_PRId32 "; RX over 1000 bytes %" B_PRId32
+		", largest %" B_PRId32 "\n", elapsed / 1000000,
+		rxFrames - fLoggedRxFrames, rxRate / 1000, (rxRate % 1000) / 100,
+		txFrames - fLoggedTxFrames, txRate / 1000, (txRate % 1000) / 100,
+		txFailed - fLoggedTxFailed, fRxPool.busyCount, fTxPool.busyCount,
+		rxLarge - fLoggedRxLarge, fRxMaxLength);
+	fLoggedRxLarge = rxLarge;
+
+	fLoggedRxFrames = rxFrames;
+	fLoggedTxFrames = txFrames;
+	fLoggedTxFailed = txFailed;
+	fLoggedRxBytes = rxBytes;
+	fLoggedTxBytes = txBytes;
+#endif
 }
 
 

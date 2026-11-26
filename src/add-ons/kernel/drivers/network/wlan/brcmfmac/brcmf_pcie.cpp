@@ -195,7 +195,19 @@ BrcmfPcie::BrcmfPcie(pci_device_module_info* pci, pci_device* device)
 	fReceiver(NULL),
 	fRxFrames(0),
 	fTxFrames(0),
-	fTxFailed(0)
+	fTxFailed(0),
+	fRxBytes(0),
+	fTxBytes(0),
+	fLastTrafficLog(0),
+	fLoggedRxFrames(0),
+	fLoggedTxFrames(0),
+	fLoggedTxFailed(0),
+	fLoggedRxBytes(0),
+	fLoggedTxBytes(0),
+	fRxLarge(0),
+	fRxMaxLength(0),
+	fRxFlagsSeen(0),
+	fLoggedRxLarge(0)
 {
 	memset(&fInfo, 0, sizeof(fInfo));
 

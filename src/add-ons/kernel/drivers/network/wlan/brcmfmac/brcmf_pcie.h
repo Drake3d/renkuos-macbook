@@ -184,6 +184,7 @@ private:
 			void				_ServiceLoop();
 			void				_HandleMailboxData();
 			void				_QueryFirmware();
+			void				_LogTraffic();
 
 			// data path (brcmf_pcie_data.cpp)
 			status_t			_AllocFramePool(brcmf_frame_pool& pool,
@@ -284,6 +285,18 @@ private:
 			int32				fRxFrames;
 			int32				fTxFrames;
 			int32				fTxFailed;
+			int64				fRxBytes;
+			int64				fTxBytes;
+			bigtime_t			fLastTrafficLog;
+			int32				fLoggedRxFrames;
+			int32				fLoggedTxFrames;
+			int32				fLoggedTxFailed;
+			int64				fLoggedRxBytes;
+			int64				fLoggedTxBytes;
+			int32				fRxLarge;		// over 1000 bytes
+			int32				fRxMaxLength;
+			uint32				fRxFlagsSeen;
+			int32				fLoggedRxLarge;
 };
 
 
