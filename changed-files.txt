@@ -1,21 +1,23 @@
 Existing RenkuOS files changed by our work
 ==========================================
 
-Branch `wifi` at bd51ec5568, compared with RenkuOS main at 7b0177e735
+Branch `wifi` at 1df69d3307, compared with RenkuOS main at 7b0177e735
 (the merge base). Lines are added / removed. Every other file of ours is
 new. Regenerate with:
   git diff --numstat --diff-filter=M $(git merge-base wifi origin/main) wifi
 
 Build registration only (one SubInclude line per new folder, package lists)
 ---------------------------------------------------------------------------
-  +4  -0    build/jam/HaikuPackages            (APFS, AppleSPIInput,
-                                                BroadcomWifi, FaceTimeHD)
- +38  -0    build/jam/OptionalPackages         (the same four, optional
+  +5  -0    build/jam/HaikuPackages            (APFS, AppleSMC,
+                                                AppleSPIInput, BroadcomWifi,
+                                                FaceTimeHD)
+ +48  -0    build/jam/OptionalPackages         (the same five, optional
                                                 image packages)
   +1  -0    src/add-ons/input_server/filters/Jamfile     (media_keys)
   +1  -0    src/add-ons/kernel/bus_managers/Jamfile      (spi)
   +1  -0    src/add-ons/kernel/busses/Jamfile            (spi)
   +1  -0    src/add-ons/kernel/drivers/input/Jamfile     (apple_spi)
+  +1  -0    src/add-ons/kernel/drivers/sensor/Jamfile    (apple_smc)
   +1  -0    src/add-ons/kernel/drivers/video/Jamfile     (facetimehd)
   +1  -0    src/add-ons/kernel/file_systems/Jamfile      (apfs)
   +1  -0    src/add-ons/media/media-add-ons/Jamfile      (facetimehd)

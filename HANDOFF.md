@@ -11,9 +11,10 @@ camera work and the built-in Wi-Fi).
   - `wifi` (work here): `apfs` plus 3 camera commits (settings kept across
     restarts, idle power-down, picture sizes/mirror/CodyCam settings) and
     4 Wi-Fi commits, then the microphone gain commit (`e707a92fb1`), APFS
-    type 4 compression (`9b7dae4981`) and APFS Unicode names. Tip:
-    `bd51ec5568` "apfs: compare and hash file names as macOS does
-    (Unicode)". Pushed 2026-11-26.
+    type 4 compression (`9b7dae4981`), APFS Unicode names (`bd51ec5568`)
+    and the Apple SMC sensor driver. Tip: `1df69d3307` "apple_smc:
+    temperatures and fan speeds of Intel Macs (read only)". Pushed
+    2026-11-26.
   - `apfs`: `apple-spi-input` plus the APFS driver, milestones 1-5
     (`personal/apfs` tip `8d6d75b8a4`). The 3 camera commits sit on the
     local `apfs` too but were pushed only as part of `wifi`.
@@ -44,6 +45,7 @@ other machines), and adds the camera files only if it finds them:
 
 # Optional packages built from this tree; add new ones here.
 local personalPackages =
+	AppleSMC		# Apple SMC sensors: temperatures and fan speeds
 	AppleSPIInput	# MacBook SPI keyboard and trackpad, media and volume keys
 	FaceTimeHD		# FaceTime HD camera: driver, media add-on, Camera prefs
 	APFS			# read-only Apple File System driver
@@ -207,10 +209,25 @@ Build, test the nightly on the MacBook, then commit the merge.
   leaving, dropped links and moving to another access point all
   reconnect; 5 GHz at 400 Mbit/s; real link rate and signal in ifconfig.
   Package `broadcom_wifi.hpkg` (optional image package BroadcomWifi).
+- Apple SMC sensors (`1df69d3307`): new driver
+  `drivers/sensor/apple_smc/` for the ACPI device APP0001 (ports
+  0x300/0x304 from _CRS). Read only; `cat /dev/sensor/apple_smc/0` lists
+  each fan (current/min/max rpm) and every sp78 temperature key, common
+  ones named; one set of readings in the syslog at boot. On the MacBook:
+  798 keys, 33 temperatures, one fan; idle 42 C with the fan stopped, full
+  load 82 C and 1380 rpm. Package `apple_smc.hpkg` (optional image
+  package AppleSMC). Install it with pkgman (see below).
+- Hardware survey (2026-11-26, survey/survey.sh on "NEW FAT VOL"): the
+  battery, AC adapter, lid, power button (ACPI drivers), ambient light
+  sensor (acpi_als) and keyboard backlight (apple_spi) already work.
+  Still missing: Bluetooth (BCM2E7C on the Intel LPSS UART 8086:9d27,
+  needs a UART driver, an H4/H5 transport and Broadcom's firmware patch);
+  sleep (no system suspend). List of planned drivers:
+  planned-drivers.txt on the drive.
 
 ## Standalone drivers and edits to RenkuOS code
 
-Compared with RenkuOS main `7b0177e735` (the `wifi` merge base). Three
+Compared with RenkuOS main `7b0177e735` (the `wifi` merge base). Four
 drivers are standalone: only new folders, plus the build registration (one
 `SubInclude` line in the parent `Jamfile`, `HaikuPackages`,
 `OptionalPackages`). They can go into any RenkuOS tree by copying their
@@ -221,6 +238,7 @@ folders and adding those lines.
 | APFS (read-only) | `apfs.hpkg` | `file_systems/apfs/` (with LZFSE), test shell and image scripts in `src/tests/` |
 | Apple SPI keyboard and trackpad | `apple_spi_input.hpkg` | `bus_managers/spi/`, `busses/spi/pch/`, `drivers/input/apple_spi/`, `input_server/filters/media_keys/`, `headers/private/spi/spi.h` |
 | FaceTime HD camera | `facetimehd.hpkg` | `drivers/video/facetimehd/`, media add-on, Camera preferences, `facetimehd_capture` |
+| Apple SMC sensors | `apple_smc.hpkg` | `drivers/sensor/apple_smc/` |
 
 These changed existing RenkuOS code, so they must be merged into each
 tree's version of those files:
@@ -293,6 +311,18 @@ them.
    "snapshot=" mount option) is in working/apfs-snapshots-shelved.patch,
    untested: macOS will not create snapshots on disk images, even as root
    (fs_snapshot_create needs an Apple entitlement).
+8. RenkuOS's FAT driver (upstream code, not ours) panics in two cases,
+   both seen on "NEW FAT VOL" on 2026-11-26: mkdir of a folder that
+   already exists (`mkdir -p`; put_vnode "not found" from dosfs_mkdir),
+   and opening an existing file for overwrite (`cp` onto an existing name;
+   ASSERT in msdosfs_fat.c:413 via detrunc/freeclusterchain). The volume
+   stayed clean both times. Proposed as its own session. Until fixed:
+   from RenkuOS, write only new file names on the stick, make folders on
+   the Mac, and replace files by dragging in Tracker (does not crash).
+9. Installing a package by copying it into /boot/system/packages can
+   fail: the package daemon may read it while it is still being copied
+   ("failed to init package for file") and never activates it. Use
+   `pkgman install <file>.hpkg` (macbook-drivers/install.sh does).
 
 ## Notes in this branch
 
