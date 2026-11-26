@@ -12,9 +12,9 @@ camera work and the built-in Wi-Fi).
     restarts, idle power-down, picture sizes/mirror/CodyCam settings) and
     4 Wi-Fi commits, then the microphone gain commit (`e707a92fb1`), APFS
     type 4 compression (`9b7dae4981`), APFS Unicode names (`bd51ec5568`)
-    and the Apple SMC sensor driver. Tip: `1df69d3307` "apple_smc:
-    temperatures and fan speeds of Intel Macs (read only)". Pushed
-    2026-11-26.
+    the Apple SMC sensor driver (`1df69d3307`) and two FAT driver fixes.
+    Tip: `c680fd5d2a` "fat: fix two panics, mkdir of an existing folder
+    and truncating read-only". Pushed 2026-11-26.
   - `apfs`: `apple-spi-input` plus the APFS driver, milestones 1-5
     (`personal/apfs` tip `8d6d75b8a4`). The 3 camera commits sit on the
     local `apfs` too but were pushed only as part of `wifi`.
@@ -249,6 +249,7 @@ tree's version of those files:
 | BCM4350 Wi-Fi | `brcmfmac` `brcmf.cpp`, `brcmfmac.h`, `driver.cpp`, `Jamfile` (PCIe side in new files) |
 | Kaby Lake brightness | `intel_extreme` `mode.cpp` and the graphics `driver.cpp` |
 | EFI start-up fix | `boot/platform/efi/arch/x86_64/arch_start.cpp` |
+| FAT driver fixes | `file_systems/fat/kernel_interface.cpp` (`dosfs_mkdir`, `dosfs_open`) |
 
 Every edited file, with line counts: changed-files.txt.
 
@@ -311,14 +312,16 @@ them.
    "snapshot=" mount option) is in working/apfs-snapshots-shelved.patch,
    untested: macOS will not create snapshots on disk images, even as root
    (fs_snapshot_create needs an Apple entitlement).
-8. RenkuOS's FAT driver (upstream code, not ours) panics in two cases,
-   both seen on "NEW FAT VOL" on 2026-11-26: mkdir of a folder that
-   already exists (`mkdir -p`; put_vnode "not found" from dosfs_mkdir),
-   and opening an existing file for overwrite (`cp` onto an existing name;
-   ASSERT in msdosfs_fat.c:413 via detrunc/freeclusterchain). The volume
-   stayed clean both times. Proposed as its own session. Until fixed:
-   from RenkuOS, write only new file names on the stick, make folders on
-   the Mac, and replace files by dragging in Tracker (does not crash).
+8. FAT driver (RenkuOS's own code): two panics fixed in `c680fd5d2a`
+   (mkdir of an existing folder; O_TRUNC on a read-only volume or file),
+   tested on the MacBook with the driver from fat-test/ on "NEW FAT VOL"
+   loaded in place of the packaged one (BlockedEntries, like the hda
+   test). Not run there: overwriting on a volume mounted read-only, the
+   exact case of the second panic. The MacBook still runs that test
+   driver: run fat-test/uninstall.sh and reboot once an image with
+   `c680fd5d2a` is installed (it keeps the hda test entries, if any).
+   Images before `c680fd5d2a` still have both panics: do not mkdir -p or
+   overwrite files on FAT drives with them (dragging in Tracker is safe).
 9. Installing a package by copying it into /boot/system/packages can
    fail: the package daemon may read it while it is still being copied
    ("failed to init package for file") and never activates it. Use

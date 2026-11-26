@@ -1,7 +1,7 @@
 Existing RenkuOS files changed by our work
 ==========================================
 
-Branch `wifi` at 1df69d3307, compared with RenkuOS main at 7b0177e735
+Branch `wifi` at c680fd5d2a, compared with RenkuOS main at 7b0177e735
 (the merge base). Lines are added / removed. Every other file of ours is
 new. Regenerate with:
   git diff --numstat --diff-filter=M $(git merge-base wifi origin/main) wifi
@@ -54,3 +54,9 @@ Kaby Lake brightness (intel_extreme)
 EFI start-up fix
 ----------------
  +11  -0    src/system/boot/platform/efi/arch/x86_64/arch_start.cpp
+
+FAT driver fixes (c680fd5d2a)
+-----------------------------
+ +19  -5    src/add-ons/kernel/file_systems/fat/kernel_interface.cpp
+                (dosfs_mkdir: no put_vnode for an existing entry;
+                dosfs_open: refuse O_TRUNC on a read-only volume or file)
