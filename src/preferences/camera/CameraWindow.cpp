@@ -15,6 +15,8 @@
 
 #include "CameraWindow.h"
 
+#include "facetimehd_settings.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -22,17 +24,16 @@
 #include <unistd.h>
 
 #include <Application.h>
-#include <File.h>
-#include <FindDirectory.h>
-#include <Path.h>
 #include <Box.h>
 #include <Button.h>
 #include <CheckBox.h>
 #include <ControlLook.h>
-#include <Directory.h>
 #include <Font.h>
 #include <LayoutBuilder.h>
+#include <MenuField.h>
+#include <MenuItem.h>
 #include <MessageRunner.h>
+#include <PopUpMenu.h>
 #include <Slider.h>
 #include <SpaceLayoutItem.h>
 #include <String.h>
@@ -50,6 +51,8 @@ enum {
 	kMsgLevelChanged		= 'lvch',
 	kMsgWhiteBalance		= 'wbal',
 	kMsgLowLight			= 'lowl',
+	kMsgMirror				= 'mirr',
+	kMsgSize				= 'size',
 	kMsgDefaults			= 'dflt',
 	kMsgUpdateStatus		= 'stat',
 	kMsgSave				= 'save'
@@ -176,6 +179,28 @@ CameraWindow::CameraWindow()
 			kLevels[i].control);
 		pictureLayout->AddView(fLevels[i]);
 	}
+	fMirror = new BCheckBox("mirror",
+		"Mirror picture (left and right swapped, like a mirror)",
+		new BMessage(kMsgMirror));
+	pictureLayout->AddView(fMirror);
+
+	fSizeMenu = new BPopUpMenu("size");
+	for (int32 i = 0; i < kFTHDPictureSizeCount; i++) {
+		BMessage* message = new BMessage(kMsgSize);
+		message->AddInt32("width", kFTHDPictureSizes[i].width);
+		message->AddInt32("height", kFTHDPictureSizes[i].height);
+		fSizeMenu->AddItem(new BMenuItem(kFTHDPictureSizes[i].label, message));
+	}
+	fSizeField = new BMenuField("size", "Picture size:", fSizeMenu);
+	BStringView* sizeNote = new BStringView("size note",
+		"For apps that let the camera choose; CodyCam always uses 320 "
+		"\xC3\x97 240.");
+	sizeNote->SetHighUIColor(B_PANEL_TEXT_COLOR, B_DARKEN_1_TINT);
+	BFont sizeNoteFont(be_plain_font);
+	sizeNoteFont.SetSize(sizeNoteFont.Size() * 0.9f);
+	sizeNote->SetFont(&sizeNoteFont);
+	pictureLayout->AddView(fSizeField);
+	pictureLayout->AddView(sizeNote);
 	pictureBox->AddChild(pictureLayout->View());
 
 	// colour and light
@@ -280,6 +305,26 @@ CameraWindow::MessageReceived(BMessage* message)
 			_ScheduleSave();
 			break;
 
+		case kMsgMirror:
+			_SetControl(FTHD_CONTROL_MIRROR, fMirror->Value() == B_CONTROL_ON);
+			_UpdateDefaultsButton();
+			_ScheduleSave();
+			break;
+
+		case kMsgSize:
+		{
+			int32 width;
+			int32 height;
+			if (message->FindInt32("width", &width) != B_OK
+				|| message->FindInt32("height", &height) != B_OK)
+				break;
+			_SetControl(FTHD_CONTROL_WIDTH, width);
+			_SetControl(FTHD_CONTROL_HEIGHT, height);
+			_UpdateDefaultsButton();
+			_ScheduleSave();
+			break;
+		}
+
 		case kMsgDefaults:
 			for (int32 i = 0; i < 4; i++) {
 				fLevels[i]->SetValue(0);
@@ -289,6 +334,11 @@ CameraWindow::MessageReceived(BMessage* message)
 			_SetControl(FTHD_CONTROL_AUTO_WHITE_BALANCE, 1);
 			fLowLight->SetValue(B_CONTROL_OFF);
 			_SetControl(FTHD_CONTROL_LOW_LIGHT, 0);
+			fMirror->SetValue(B_CONTROL_ON);
+			_SetControl(FTHD_CONTROL_MIRROR, 1);
+			_SelectSize(FTHD_DEFAULT_WIDTH, FTHD_DEFAULT_HEIGHT);
+			_SetControl(FTHD_CONTROL_WIDTH, FTHD_DEFAULT_WIDTH);
+			_SetControl(FTHD_CONTROL_HEIGHT, FTHD_DEFAULT_HEIGHT);
 			_UpdateDefaultsButton();
 			_ScheduleSave();
 			break;
@@ -351,6 +401,21 @@ CameraWindow::_Load()
 	fLowLight->SetValue(value != 0 ? B_CONTROL_ON : B_CONTROL_OFF);
 	fLowLight->SetEnabled(available);
 
+	value = 1;
+	if (available)
+		_Control(FTHD_GET_CONTROL, FTHD_CONTROL_MIRROR, &value);
+	fMirror->SetValue(value != 0 ? B_CONTROL_ON : B_CONTROL_OFF);
+	fMirror->SetEnabled(available);
+
+	int32 width = FTHD_DEFAULT_WIDTH;
+	int32 height = FTHD_DEFAULT_HEIGHT;
+	if (available) {
+		_Control(FTHD_GET_CONTROL, FTHD_CONTROL_WIDTH, &width);
+		_Control(FTHD_GET_CONTROL, FTHD_CONTROL_HEIGHT, &height);
+	}
+	_SelectSize(width, height);
+	fSizeField->SetEnabled(available);
+
 	_UpdateStatus();
 	_UpdateDefaultsButton();
 }
@@ -361,6 +426,48 @@ CameraWindow::_SetControl(uint32 id, int32 value)
 {
 	if (_Control(FTHD_SET_CONTROL, id, &value) != B_OK)
 		_UpdateStatus();
+}
+
+
+/*!	Marks the menu item of this size; a size not in the list (set by hand
+	in the settings file) gets an item of its own.
+*/
+void
+CameraWindow::_SelectSize(int32 width, int32 height)
+{
+	for (int32 i = 0; i < fSizeMenu->CountItems(); i++) {
+		BMenuItem* item = fSizeMenu->ItemAt(i);
+		int32 itemWidth;
+		int32 itemHeight;
+		if (item->Message()->FindInt32("width", &itemWidth) == B_OK
+			&& item->Message()->FindInt32("height", &itemHeight) == B_OK
+			&& itemWidth == width && itemHeight == height) {
+			item->SetMarked(true);
+			return;
+		}
+	}
+
+	BString label;
+	label.SetToFormat("%" B_PRId32 " \xC3\x97 %" B_PRId32, width, height);
+	BMessage* message = new BMessage(kMsgSize);
+	message->AddInt32("width", width);
+	message->AddInt32("height", height);
+	BMenuItem* item = new BMenuItem(label, message);
+	fSizeMenu->AddItem(item);
+	item->SetMarked(true);
+}
+
+
+void
+CameraWindow::_SelectedSize(int32* _width, int32* _height)
+{
+	*_width = FTHD_DEFAULT_WIDTH;
+	*_height = FTHD_DEFAULT_HEIGHT;
+	BMenuItem* item = fSizeMenu->FindMarked();
+	if (item != NULL) {
+		item->Message()->FindInt32("width", _width);
+		item->Message()->FindInt32("height", _height);
+	}
 }
 
 
@@ -377,51 +484,15 @@ CameraWindow::_ScheduleSave()
 }
 
 
-/*!	Writes the current settings to the driver's settings file (see
-	facetimehd_ioctl.h), through a temporary file so a crash never leaves a
-	half-written one behind.
+/*!	Saves the settings the driver now has (fthd_save_settings(), shared
+	with the camera's media add-on).
 */
 status_t
 CameraWindow::_SaveSettings()
 {
 	fSavePending = false;
 
-	int32 values[FTHD_CONTROL_COUNT];
-	for (int32 i = 0; i < 4; i++)
-		values[fLevels[i]->Control()] = driver_for_level(fLevels[i]->Value());
-	values[FTHD_CONTROL_AUTO_WHITE_BALANCE]
-		= fWhiteBalance->Value() == B_CONTROL_ON ? 1 : 0;
-	values[FTHD_CONTROL_LOW_LIGHT] = fLowLight->Value() == B_CONTROL_ON ? 1 : 0;
-
-	BString text("# FaceTime HD camera picture settings, written by the "
-		"Camera preferences.\n# The facetimehd driver reads them when it "
-		"loads.\n");
-	for (uint32 id = 0; id < FTHD_CONTROL_COUNT; id++)
-		text << kFTHDControlNames[id] << " " << values[id] << "\n";
-
-	BPath path;
-	status_t status = find_directory(B_USER_SETTINGS_DIRECTORY, &path, true);
-	if (status == B_OK)
-		status = path.Append("kernel/drivers");
-	if (status == B_OK)
-		status = create_directory(path.Path(), 0755);
-	if (status != B_OK)
-		return status;
-
-	BPath temporary(path.Path(), FTHD_SETTINGS_NAME "~");
-	BPath final(path.Path(), FTHD_SETTINGS_NAME);
-	BFile file(temporary.Path(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
-	status = file.InitCheck();
-	if (status == B_OK) {
-		ssize_t written = file.Write(text.String(), text.Length());
-		if (written != text.Length())
-			status = written < 0 ? written : B_IO_ERROR;
-	}
-	if (status == B_OK)
-		status = file.Sync();
-	file.Unset();
-	if (status == B_OK && rename(temporary.Path(), final.Path()) != 0)
-		status = errno;
+	status_t status = fDevice >= 0 ? fthd_save_settings(fDevice) : B_NO_INIT;
 
 	// Shown on the status line until the next save.
 	if (status == B_OK)
@@ -461,8 +532,13 @@ CameraWindow::_UpdateStatus()
 void
 CameraWindow::_UpdateDefaultsButton()
 {
+	int32 width;
+	int32 height;
+	_SelectedSize(&width, &height);
 	bool isDefault = fWhiteBalance->Value() == B_CONTROL_ON
-		&& fLowLight->Value() == B_CONTROL_OFF;
+		&& fLowLight->Value() == B_CONTROL_OFF
+		&& fMirror->Value() == B_CONTROL_ON
+		&& width == FTHD_DEFAULT_WIDTH && height == FTHD_DEFAULT_HEIGHT;
 	for (int32 i = 0; i < 4; i++) {
 		if (fLevels[i]->Value() != 0)
 			isDefault = false;

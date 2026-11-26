@@ -86,6 +86,8 @@ private:
 									const media_raw_video_format& format);
 			void				_SetUpScaling(
 									const media_raw_video_format& format);
+			void				_ChooseFrameSize(
+									const media_raw_video_format& format);
 
 			BMediaAddOn*		fAddOn;
 			int32				fInternalID;
@@ -105,8 +107,10 @@ private:
 			int					fDevice;
 			uint8*				fFrame;
 			uint32				fFrameSize;
-			uint32				fCameraWidth;
+			uint32				fCameraWidth;	// the largest frame size
 			uint32				fCameraHeight;
+			uint32				fFrameWidth;	// asked of the camera for
+			uint32				fFrameHeight;	// this connection
 			uint32				fFramesSent;
 			bigtime_t			fLastControlChange;
 };

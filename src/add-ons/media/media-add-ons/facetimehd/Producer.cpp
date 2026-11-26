@@ -8,10 +8,13 @@
 /*!	The FaceTime HD camera as a media node: a live video input that streams
 	from the facetimehd driver while the node runs.
 
-	The camera delivers 1280x720 YUYV. The node passes that on unchanged as
-	B_YCbCr422, or converts it to B_RGB32 at any size up to 1280x720,
-	cutting the largest centred window of the requested shape and scaling
-	it, as most video consumers (CodyCam among them) want RGB.
+	The camera scales in hardware: the node asks it for the connection's
+	size (rounded up to even), so it passes YUYV on unchanged as B_YCbCr422
+	at any even size up to 1280x720, or converts it pixel for pixel to
+	B_RGB32, which most video consumers (CodyCam among them) want. If the
+	driver cannot choose the size, the camera runs at 1280x720 and the node
+	cuts the largest centred window of the requested shape and scales it.
+	The driver mirrors the picture if the Camera preferences say so.
 
 	The camera is only turned on while the node is started.
 */
@@ -35,6 +38,7 @@
 #include <TimeSource.h>
 
 #include "facetimehd_ioctl.h"
+#include "facetimehd_settings.h"
 
 
 const char* kFaceTimeHDDevice = "/dev/video/facetimehd/0";
@@ -49,6 +53,9 @@ static const float kLevelRange = 100.0f;
 // ids of the group titles, apart from the driver's FTHD_CONTROL_*
 static const int32 kPictureTitle = 100;
 static const int32 kLightTitle = 101;
+// Picture size: one menu for the two size controls; its value is an index
+// into kFTHDPictureSizes.
+static const int32 kPictureSize = 102;
 
 
 // into the system log, next to the driver's own messages
@@ -76,8 +83,10 @@ FaceTimeHDProducer::FaceTimeHDProducer(BMediaAddOn* addOn, const char* name,
 	fDevice(-1),
 	fFrame(NULL),
 	fFrameSize(0),
-	fCameraWidth(1280),
-	fCameraHeight(720),
+	fCameraWidth(FTHD_MAX_WIDTH),
+	fCameraHeight(FTHD_MAX_HEIGHT),
+	fFrameWidth(FTHD_DEFAULT_WIDTH),
+	fFrameHeight(FTHD_DEFAULT_HEIGHT),
 	fFramesSent(0),
 	fLastControlChange(0)
 {
@@ -153,6 +162,14 @@ FaceTimeHDProducer::NodeRegistered()
 		picture->MakeContinuousParameter(kLevels[i].id, B_MEDIA_RAW_VIDEO,
 			kLevels[i].name, B_GENERIC, "", -kLevelRange, kLevelRange, 1);
 	}
+	// The same settings, in the same order, as the Camera preferences.
+	picture->MakeDiscreteParameter(FTHD_CONTROL_MIRROR, B_MEDIA_RAW_VIDEO,
+		"Mirror picture (left and right swapped, like a mirror)", B_ENABLE);
+	BDiscreteParameter* size = picture->MakeDiscreteParameter(kPictureSize,
+		B_MEDIA_RAW_VIDEO, "Picture size (for apps that let the camera "
+		"choose)", B_GENERIC);
+	for (int32 i = 0; i < kFTHDPictureSizeCount; i++)
+		size->AddItem(i, kFTHDPictureSizes[i].label);
 
 	BParameterGroup* light = main->MakeGroup("Colour and light");
 	light->MakeNullParameter(kLightTitle, B_MEDIA_RAW_VIDEO,
@@ -160,7 +177,7 @@ FaceTimeHDProducer::NodeRegistered()
 	light->MakeDiscreteParameter(FTHD_CONTROL_AUTO_WHITE_BALANCE,
 		B_MEDIA_RAW_VIDEO, "Automatic white balance", B_ENABLE);
 	light->MakeDiscreteParameter(FTHD_CONTROL_LOW_LIGHT, B_MEDIA_RAW_VIDEO,
-		"Brighter in low light (slower frame rate)", B_ENABLE);
+		"Brighter picture in low light (5 frames per second)", B_ENABLE);
 	SetParameterWeb(web);
 
 	SetPriority(B_URGENT_DISPLAY_PRIORITY);
@@ -202,6 +219,29 @@ FaceTimeHDProducer::HandleEvent(const media_timed_event* event,
 /*!	Fills in the wildcards of \a format and checks that the camera can
 	deliver it.
 */
+/*!	The picture size chosen in the Camera preferences: what the driver
+	gives a newly opened device. Opening it does not switch the camera on.
+*/
+static void
+default_size(uint32* _width, uint32* _height)
+{
+	*_width = FTHD_DEFAULT_WIDTH;
+	*_height = FTHD_DEFAULT_HEIGHT;
+
+	int device = open(kFaceTimeHDDevice, O_RDWR);
+	if (device < 0)
+		return;
+	fthd_info info;
+	if (ioctl(device, FTHD_GET_INFO, &info, sizeof(info)) == 0
+		&& info.version == FTHD_IOCTL_VERSION && info.width != 0
+		&& info.height != 0) {
+		*_width = info.width;
+		*_height = info.height;
+	}
+	close(device);
+}
+
+
 status_t
 FaceTimeHDProducer::_SpecializeFormat(media_format* format) const
 {
@@ -220,19 +260,27 @@ FaceTimeHDProducer::_SpecializeFormat(media_format* format) const
 		return B_MEDIA_BAD_FORMAT;
 	}
 
-	if (video.display.line_width == wildcard.display.line_width)
-		video.display.line_width = fCameraWidth;
-	if (video.display.line_count == wildcard.display.line_count)
-		video.display.line_count = fCameraHeight;
+	// Sizes the consumer leaves open: the Camera preferences' choice.
+	if (video.display.line_width == wildcard.display.line_width
+		|| video.display.line_count == wildcard.display.line_count) {
+		uint32 defaultWidth;
+		uint32 defaultHeight;
+		default_size(&defaultWidth, &defaultHeight);
+		if (video.display.line_width == wildcard.display.line_width)
+			video.display.line_width = defaultWidth;
+		if (video.display.line_count == wildcard.display.line_count)
+			video.display.line_count = defaultHeight;
+	}
 	uint32 width = video.display.line_width;
 	uint32 height = video.display.line_count;
 	if (width < 2 || height < 2 || width > fCameraWidth
 		|| height > fCameraHeight) {
 		return B_MEDIA_BAD_FORMAT;
 	}
-	// YCbCr goes out as the camera made it
+	// YCbCr goes out as the camera made it: two pixels per four bytes, and
+	// the camera only makes even sizes
 	if (video.display.format == B_YCbCr422
-		&& (width != fCameraWidth || height != fCameraHeight)) {
+		&& ((width & 1) != 0 || (height & 1) != 0)) {
 		return B_MEDIA_BAD_FORMAT;
 	}
 
@@ -413,6 +461,7 @@ FaceTimeHDProducer::Connect(status_t error, const media_source& source,
 		fOutput.destination = media_destination::null;
 		return;
 	}
+	_ChooseFrameSize(video);
 	_SetUpScaling(video);
 
 	bigtime_t latency = 0;
@@ -535,17 +584,59 @@ driver_for_level(float level)
 }
 
 
+/*!	The index into kFTHDPictureSizes of the camera's picture size setting,
+	or the first one if the setting is not in the list.
+*/
+static int32
+size_index(int32 width, int32 height)
+{
+	for (int32 i = 0; i < kFTHDPictureSizeCount; i++) {
+		if (kFTHDPictureSizes[i].width == width
+			&& kFTHDPictureSizes[i].height == height)
+			return i;
+	}
+	return 0;
+}
+
+
+/*!	Keeps the settings for the next boot, in the same file the Camera
+	preferences write.
+*/
+static void
+save_settings()
+{
+	int fd = open(kFaceTimeHDDevice, O_RDWR);
+	if (fd < 0)
+		return;
+	status_t status = fthd_save_settings(fd);
+	close(fd);
+	if (status != B_OK)
+		TRACE("saving the settings failed: %s\n", strerror(status));
+}
+
+
 status_t
 FaceTimeHDProducer::GetParameterValue(int32 id, bigtime_t* _lastChange,
 	void* value, size_t* _size)
 {
-	if (id < 0 || id >= FTHD_CONTROL_COUNT)
-		return B_BAD_VALUE;
-
 	int32 current = 0;
-	status_t status = _Control(FTHD_GET_CONTROL, id, &current);
-	if (status != B_OK)
-		return status;
+	if (id == kPictureSize) {
+		int32 width = 0;
+		int32 height = 0;
+		status_t status = _Control(FTHD_GET_CONTROL, FTHD_CONTROL_WIDTH,
+			&width);
+		if (status == B_OK)
+			status = _Control(FTHD_GET_CONTROL, FTHD_CONTROL_HEIGHT, &height);
+		if (status != B_OK)
+			return status;
+		current = size_index(width, height);
+	} else if (id >= 0 && id < FTHD_CONTROL_COUNT && id != FTHD_CONTROL_WIDTH
+		&& id != FTHD_CONTROL_HEIGHT) {
+		status_t status = _Control(FTHD_GET_CONTROL, id, &current);
+		if (status != B_OK)
+			return status;
+	} else
+		return B_BAD_VALUE;
 
 	*_lastChange = fLastControlChange;
 	if (is_level(id)) {
@@ -567,24 +658,45 @@ void
 FaceTimeHDProducer::SetParameterValue(int32 id, bigtime_t when,
 	const void* value, size_t size)
 {
-	if (id < 0 || id >= FTHD_CONTROL_COUNT || value == NULL)
+	if (value == NULL)
 		return;
 
 	int32 newValue;
-	if (is_level(id)) {
-		if (size < sizeof(float))
-			return;
-		newValue = driver_for_level(*(const float*)value);
-	} else {
+	if (id == kPictureSize) {
 		if (size < sizeof(int32))
 			return;
-		newValue = *(const int32*)value != 0 ? 1 : 0;
-	}
+		newValue = *(const int32*)value;
+		if (newValue < 0 || newValue >= kFTHDPictureSizeCount)
+			return;
+		// Used by streams started from now on.
+		int32 width = kFTHDPictureSizes[newValue].width;
+		int32 height = kFTHDPictureSizes[newValue].height;
+		if (_Control(FTHD_SET_CONTROL, FTHD_CONTROL_WIDTH, &width) != B_OK
+			|| _Control(FTHD_SET_CONTROL, FTHD_CONTROL_HEIGHT, &height)
+				!= B_OK) {
+			TRACE("setting the picture size failed\n");
+			return;
+		}
+	} else if (id >= 0 && id < FTHD_CONTROL_COUNT && id != FTHD_CONTROL_WIDTH
+		&& id != FTHD_CONTROL_HEIGHT) {
+		if (is_level(id)) {
+			if (size < sizeof(float))
+				return;
+			newValue = driver_for_level(*(const float*)value);
+		} else {
+			if (size < sizeof(int32))
+				return;
+			newValue = *(const int32*)value != 0 ? 1 : 0;
+		}
 
-	if (_Control(FTHD_SET_CONTROL, id, &newValue) != B_OK) {
-		TRACE("setting control %" B_PRId32 " failed\n", id);
+		if (_Control(FTHD_SET_CONTROL, id, &newValue) != B_OK) {
+			TRACE("setting control %" B_PRId32 " failed\n", id);
+			return;
+		}
+	} else
 		return;
-	}
+
+	save_settings();
 
 	fLastControlChange = when;
 	if (is_level(id)) {
@@ -611,16 +723,33 @@ FaceTimeHDProducer::_StartCapture()
 		return;
 	}
 
+	// Ask the camera for the connection's size; scale in software from
+	// 1280x720 if it cannot.
+	{
+		BAutolock locker(fLock);
+		fthd_size size = { fFrameWidth, fFrameHeight };
+		if (ioctl(fDevice, FTHD_SET_SIZE, &size, sizeof(size)) != 0) {
+			TRACE("the camera cannot make %" B_PRIu32 "x%" B_PRIu32 " (%s); "
+				"scaling 1280x720\n", fFrameWidth, fFrameHeight,
+				strerror(errno));
+			fFrameWidth = FTHD_DEFAULT_WIDTH;
+			fFrameHeight = FTHD_DEFAULT_HEIGHT;
+			_SetUpScaling(fOutput.format.u.raw_video);
+		}
+	}
+
 	fthd_info info;
 	if (ioctl(fDevice, FTHD_GET_INFO, &info, sizeof(info)) != 0
-		|| info.version != FTHD_IOCTL_VERSION || info.width != fCameraWidth
-		|| info.height != fCameraHeight) {
+		|| info.version != FTHD_IOCTL_VERSION || info.width != fFrameWidth
+		|| info.height != fFrameHeight) {
 		TRACE("the driver does not match this add-on\n");
 		close(fDevice);
 		fDevice = -1;
 		ReportError(B_NODE_IN_DISTRESS);
 		return;
 	}
+	TRACE("camera frames %" B_PRIu32 "x%" B_PRIu32 "\n", fFrameWidth,
+		fFrameHeight);
 
 	fFrameSize = info.frame_size;
 	fFrame = (uint8*)malloc(fFrameSize);
@@ -732,8 +861,24 @@ FaceTimeHDProducer::_Capture()
 }
 
 
+/*!	The size to ask the camera for: the output's, rounded up to even and
+	to the camera's smallest size. Software scaling covers the difference.
+*/
+void
+FaceTimeHDProducer::_ChooseFrameSize(const media_raw_video_format& format)
+{
+	uint32 width = (format.display.line_width + 1) & ~1u;
+	uint32 height = (format.display.line_count + 1) & ~1u;
+	fFrameWidth = width < FTHD_MIN_WIDTH ? FTHD_MIN_WIDTH
+		: width > fCameraWidth ? fCameraWidth : width;
+	fFrameHeight = height < FTHD_MIN_HEIGHT ? FTHD_MIN_HEIGHT
+		: height > fCameraHeight ? fCameraHeight : height;
+}
+
+
 /*!	Picks, for each output column and row, the camera pixel it shows: the
-	largest centred window of the output's shape, scaled to fit.
+	largest centred window of the output's shape in the camera frame,
+	scaled to fit (one to one when the camera made the output's size).
 */
 void
 FaceTimeHDProducer::_SetUpScaling(const media_raw_video_format& format)
@@ -746,14 +891,14 @@ FaceTimeHDProducer::_SetUpScaling(const media_raw_video_format& format)
 
 	uint32 width = format.display.line_width;
 	uint32 height = format.display.line_count;
-	uint32 windowWidth = fCameraWidth;
-	uint32 windowHeight = (uint64)fCameraWidth * height / width;
-	if (windowHeight > fCameraHeight) {
-		windowHeight = fCameraHeight;
-		windowWidth = (uint64)fCameraHeight * width / height;
+	uint32 windowWidth = fFrameWidth;
+	uint32 windowHeight = (uint64)fFrameWidth * height / width;
+	if (windowHeight > fFrameHeight) {
+		windowHeight = fFrameHeight;
+		windowWidth = (uint64)fFrameHeight * width / height;
 	}
-	uint32 left = (fCameraWidth - windowWidth) / 2;
-	uint32 top = (fCameraHeight - windowHeight) / 2;
+	uint32 left = (fFrameWidth - windowWidth) / 2;
+	uint32 top = (fFrameHeight - windowHeight) / 2;
 
 	fColumnMap = (uint32*)malloc(width * sizeof(uint32));
 	fRowMap = (uint32*)malloc(height * sizeof(uint32));
@@ -783,10 +928,12 @@ FaceTimeHDProducer::_Convert(const uint8* frame, uint8* target,
 {
 	uint32 width = format.display.line_width;
 	uint32 height = format.display.line_count;
-	uint32 cameraRow = fCameraWidth * 2;
+	uint32 cameraRow = fFrameWidth * 2;
 
 	if (format.display.format == B_YCbCr422) {
-		memcpy(target, frame, cameraRow * fCameraHeight);
+		// the camera made exactly this size
+		if (fFrameWidth == width && fFrameHeight == height)
+			memcpy(target, frame, cameraRow * fFrameHeight);
 		return;
 	}
 	if (fColumnMap == NULL || fRowMap == NULL)

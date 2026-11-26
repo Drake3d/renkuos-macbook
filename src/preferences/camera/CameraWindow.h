@@ -15,6 +15,8 @@
 
 class BButton;
 class BCheckBox;
+class BMenuField;
+class BPopUpMenu;
 class BMessageRunner;
 class BStringView;
 class LevelSlider;
@@ -33,6 +35,8 @@ private:
 			void				_Load();
 			void				_SetControl(uint32 id, int32 value);
 			void				_ScheduleSave();
+			void				_SelectSize(int32 width, int32 height);
+			void				_SelectedSize(int32* _width, int32* _height);
 			status_t			_SaveSettings();
 			void				_UpdateStatus();
 			void				_UpdateDefaultsButton();
@@ -41,6 +45,9 @@ private:
 			LevelSlider*		fLevels[4];
 			BCheckBox*			fWhiteBalance;
 			BCheckBox*			fLowLight;
+			BCheckBox*			fMirror;
+			BPopUpMenu*			fSizeMenu;
+			BMenuField*			fSizeField;
 			BButton*			fDefaultsButton;
 			BStringView*		fStatus;
 			BMessageRunner*		fStatusRunner;

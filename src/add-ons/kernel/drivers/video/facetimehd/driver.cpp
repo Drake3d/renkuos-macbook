@@ -117,6 +117,8 @@ is_camera(const pci_info& info)
 struct fthd_cookie {
 	fthd_device*	device;
 	bool			started;	// this opener started the stream
+	uint32			width;		// FTHD_SET_SIZE, for this opener's streams
+	uint32			height;
 };
 
 
@@ -132,6 +134,9 @@ fthd_open(const char* name, uint32 flags, void** _cookie)
 			return B_NO_MEMORY;
 		cookie->device = &sDevices[i];
 		cookie->started = false;
+		// the default size the Camera preferences chose
+		cookie->width = sDevices[i].controls[FTHD_CONTROL_WIDTH];
+		cookie->height = sDevices[i].controls[FTHD_CONTROL_HEIGHT];
 		*_cookie = cookie;
 		return B_OK;
 	}
@@ -180,10 +185,10 @@ fthd_ioctl(void* _cookie, uint32 op, void* buffer, size_t length)
 			info.sensor_count = device->sensor_count;
 			info.sensor_width = device->sensor_width;
 			info.sensor_height = device->sensor_height;
-			info.width = device->width;
-			info.height = device->height;
-			info.bytes_per_row = device->width * 2;
-			info.frame_size = device->width * device->height * 2;
+			info.width = cookie->width;
+			info.height = cookie->height;
+			info.bytes_per_row = cookie->width * 2;
+			info.frame_size = cookie->width * cookie->height * 2;
 			info.streaming = device->streaming;
 			info.frames_received = atomic_get(&device->frames_received);
 			// also while the camera is powered down
@@ -210,9 +215,31 @@ fthd_ioctl(void* _cookie, uint32 op, void* buffer, size_t length)
 			return user_memcpy(buffer, &control, sizeof(control));
 		}
 
+		case FTHD_SET_SIZE:
+		{
+			fthd_size size;
+			if (buffer == NULL || length < sizeof(size)
+				|| !IS_USER_ADDRESS(buffer)
+				|| user_memcpy(&size, buffer, sizeof(size)) != B_OK) {
+				return B_BAD_VALUE;
+			}
+			if (size.width < FTHD_MIN_WIDTH || size.width > FTHD_MAX_WIDTH
+				|| size.height < FTHD_MIN_HEIGHT
+				|| size.height > FTHD_MAX_HEIGHT
+				|| (size.width & 1) != 0 || (size.height & 1) != 0) {
+				return B_BAD_VALUE;
+			}
+			if (cookie->started)
+				return B_BUSY;
+			cookie->width = size.width;
+			cookie->height = size.height;
+			return B_OK;
+		}
+
 		case FTHD_START:
 		{
-			status_t status = fthd_stream_start(device);
+			status_t status = fthd_stream_start(device, cookie->width,
+				cookie->height);
 			if (status == B_OK)
 				cookie->started = true;
 			return status;

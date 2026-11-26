@@ -142,6 +142,7 @@ struct fthd_device {
 	uint32			set_file;			// S2 MEM offset, 0 if not loaded
 	bool			set_file_seen;		// loaded at least once (for info)
 	int32			controls[FTHD_CONTROL_COUNT];
+	uint8*			mirror_row;			// one row, for mirrored copies
 
 	// streaming (stream.cpp)
 	mutex			stream_lock;
@@ -297,7 +298,9 @@ status_t	fthd_copy_file_to_memory(fthd_device* device, int fd,
 void		fthd_stream_init(fthd_device* device);
 void		fthd_stream_uninit(fthd_device* device);
 void		fthd_stream_query_sensor(fthd_device* device);
-status_t	fthd_stream_start(fthd_device* device);
+status_t	fthd_stream_start(fthd_device* device, uint32 width,
+				uint32 height);
+bool		fthd_control_value_valid(uint32 id, int32 value);
 void		fthd_stream_stop(fthd_device* device);
 status_t	fthd_stream_set_control(fthd_device* device, uint32 id,
 				int32 value);
