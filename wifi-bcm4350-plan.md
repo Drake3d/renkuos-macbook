@@ -66,3 +66,18 @@ it is split as above.
 - Firmware: `brcmfmac4350c2-pcie.bin` (or `brcmfmac4350-pcie.bin`, by chip rev)
   from linux-firmware, Broadcom's redistributable closed licence. Not committed;
   the user copies it onto the MacBook. PCIe 4350 should not need an NVRAM file.
+
+## Test rounds (2026-11-26, committed as 419c2da7d4)
+- Round 1: Network preferences works; 5 GHz channel 159 at 400 Mbit/s;
+  50 MB upload in 15 s (about 27 Mbit/s), no TX failures; idle 15 min OK.
+- Round 2: signal fixed (-29 dBm, from the scan when the firmware has no
+  reading yet); upload again ~28 Mbit/s. Downloads "failed", but only
+  because the test servers did: Cloudflare's __down sent 1 byte to curl,
+  and speedtest.tele2.net never answered on IPv4 port 80.
+- Round 3: pings up to 1472 bytes (and 3000, fragmented) answered, to the
+  internet and the router; web pages load; up to 5730 frames of 1514
+  bytes a minute received. Large frames are fine.
+- Download: linux-6.6.tar.xz from cdn.kernel.org (about 140 MB) arrived
+  within one minute's summary: 95467 frames, 93958 of them full size,
+  18.9 Mbit/s averaged over that minute (so at least that), no drops,
+  all 255 RX buffers kept posted.
