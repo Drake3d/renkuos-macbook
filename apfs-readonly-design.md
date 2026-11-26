@@ -1,9 +1,34 @@
 # APFS file system: read-only design (write later)
 
-Status: design only, nothing implemented (2026-11-25). Same approach as the
-camera and sound drivers: write new MIT code, use Apple's published
-specification as the main source, use GPL drivers for facts only, and record
-where every fact came from.
+Status (2026-11-25): read-only driver done; milestones 1-5 tested on the
+MacBookPro14,1 (branch `apfs`).
+Same approach as the camera and sound drivers: write new MIT code, use
+Apple's published specification as the main source, use GPL drivers for
+facts only, and record where every fact came from. In practice no GPL code
+or driver was consulted: every fact came from Apple's reference or from
+images made by macOS (section 11).
+
+## 0. Results so far
+
+- Milestone 1 (cf8d31945c): container, newest checkpoint (falls back past a
+  damaged one), object maps, B-trees, volume list, mount by
+  "volume=<index|name>".
+- Milestone 2 (b15a71eb3b): inodes, directories, stat, symlinks, file data.
+- Milestone 3 (1cd65d5719): file cache and paging (programs run from APFS),
+  hashed name lookup for ASCII names, extended attributes.
+- Milestone 4 (405408d8f7): compressed files (decmpfs types 1, 3, 7, 8, 11,
+  12) with Apple's BSD LZFSE/LZVN decoder; compressed programs run.
+- Milestone 5 (8d6d75b8a4): apfs.hpkg / optional image package APFS;
+  free space from the space manager (matches macOS); metadata fuzzing with
+  re-sealed checksums (240 runs, no crash or hang, under Guard Malloc);
+  nightly ISO with the package built in, tested on the MacBook.
+- Tested on real drives: two 4 TB macOS APFS SSDs (largest: 82040 files,
+  8809-node tree), movie playback, running programs.
+
+Open: non-ASCII names in other normalization forms (needs Unicode NFD and
+case-folding tables in the kernel), decmpfs type 4 (zlib in a classic
+resource fork; macOS would not confirm the layout), snapshots, encrypted
+volumes, write support.
 
 Goal of this stage: mount unencrypted APFS volumes read-only in RenkuOS and
 read every file, directory, symlink and attribute on them, including
@@ -193,3 +218,23 @@ only) the MacBook's own macOS partition if it is still there.
    MacBook with a USB drive, harden against corrupt images. ~1 session.
 
 Rough total: 5–8 working sessions for read-only.
+
+## 11. Where real volumes differ from the reference (found while testing)
+
+Each was found on images made by macOS and is noted in the code.
+
+1. `xf_blob_t.xf_used_data` counts only the extended-field data, not the
+   `x_field_t` table in front of it.
+2. `J_DREC_HASH_MASK` is printed as 0xfffff400; a 22-bit hash shifted by
+   10 needs 0xfffffc00.
+3. Directory-name hash: CRC-32C over the NFD name as UTF-32LE **without** a
+   terminating null, started at 0xffffffff and **not** complemented;
+   case-insensitive volumes hash the case-folded name. (The reference says
+   null-terminated and complemented.) Hashed keys sort by
+   `name_len_and_hash` as a number.
+4. Free space as macOS shows it is `sm_dev[SD_MAIN].sm_free_count` plus
+   `sm_fq[SFQ_MAIN].sfq_count`.
+
+decmpfs (not in the reference) was worked out by reading files macOS
+compressed and by building files by hand that macOS then read back
+(`src/tests/add-ons/kernel/file_systems/apfs/craft_decmpfs.py`).

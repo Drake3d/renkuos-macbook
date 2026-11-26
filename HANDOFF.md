@@ -2,13 +2,18 @@
 
 Last updated 2026-11-25. Read this first when continuing on another
 computer. This branch (`notes`) holds only notes; the code is on the
-`apple-spi-input` branch of this repository.
+`apfs` branch of this repository (everything on `apple-spi-input`, plus the
+APFS driver).
 
 ## Where things are
 
-- Code: github.com/Drake3d/renkuos-macbook, branch `apple-spi-input`
-  (based on RenkuOS/Source `main`). Tip: `24f9dc8e84` "Merge RenkuOS main
-  into apple-spi-input" (RenkuOS `main` at `7b0177e735`, 2026-11-25).
+- Code: github.com/Drake3d/renkuos-macbook.
+  - `apfs` (work here): `apple-spi-input` plus the APFS driver, milestones
+    1-5. Local tip: `8d6d75b8a4` "apfs: milestone 5, package, free space and
+    hardening". Push it before switching computers (`git push` on `apfs`);
+    on 2026-11-25 `personal/apfs` still had only milestone 1.
+  - `apple-spi-input`: everything before APFS. Tip: `24f9dc8e84` "Merge
+    RenkuOS main into apple-spi-input" (RenkuOS `main` at `7b0177e735`).
 - Remotes in a working clone:
   - `origin` = https://github.com/RenkuOS/Source.git (read only for us)
   - `personal` = https://github.com/Drake3d/renkuos-macbook.git
@@ -20,31 +25,55 @@ git clone https://github.com/RenkuOS/Source.git
 cd Source
 git remote add personal https://github.com/Drake3d/renkuos-macbook.git
 git fetch personal
-git switch -c apple-spi-input --track personal/apple-spi-input
+git switch -c apfs --track personal/apfs
 ```
 
-Then create `build/jam/UserBuildConfig` (git-ignored):
+Then create `build/jam/UserBuildConfig` (git-ignored). It puts every
+package of this work into each image (so one image tests the MacBook and
+other machines), and adds the camera files only if it finds them:
 
 ```
 # Personal build settings (git-ignored).
-AddOptionalHaikuImagePackages AppleSPIInput ;
-AddOptionalHaikuImagePackages FaceTimeHD ;
 
-# Personal test images only: put Apple's camera files into the image.
-# Adjust the folder to wherever the two files are on this computer.
-local fthdWorking = /Volumes/Source/working ;
-AddFilesToHaikuImage system non-packaged data firmware facetimehd
-	: $(fthdWorking)/fthd-extract/firmware.bin
-	  $(fthdWorking)/setfile-extract/1571_01XX.dat ;
+# Optional packages built from this tree; add new ones here.
+local personalPackages =
+	AppleSPIInput	# MacBook SPI keyboard and trackpad, media and volume keys
+	FaceTimeHD		# FaceTime HD camera: driver, media add-on, Camera prefs
+	APFS			# read-only Apple File System driver
+	;
+AddOptionalHaikuImagePackages $(personalPackages) ;
+
+# Apple's camera files, for personal test images only; never committed.
+# Set RENKU_FTHD_FILES to the folder holding fthd-extract/firmware.bin and
+# setfile-extract/1571_01XX.dat if it is not /Volumes/Source/working.
+local fthdWorking = $(RENKU_FTHD_FILES:E=/Volumes/Source/working) ;
+local fthdFirmware = [ Glob $(fthdWorking)/fthd-extract : firmware.bin ] ;
+local fthdSetFile = [ Glob $(fthdWorking)/setfile-extract : 1571_01XX.dat ] ;
+if $(fthdFirmware) && $(fthdSetFile) {
+	AddFilesToHaikuImage system non-packaged data firmware facetimehd
+		: $(fthdFirmware) $(fthdSetFile) ;
+} else {
+	Echo "UserBuildConfig: FaceTime HD firmware not found in"
+		"$(fthdWorking); the image will not include it." ;
+}
 ```
 
-The last block is optional; without it, copy the camera files by hand
-(see "Camera" below). With it, a freshly flashed or installed image has a
-working camera (tested 2026-11-25). The files stay outside the repository.
+Already part of every image without a setting: the CS8409 sound (hda),
+Kaby Lake brightness (intel_extreme) and the EFI start-up fix. With the
+camera files found, a freshly installed image has a working camera
+(tested 2026-11-25); without them, copy them by hand (see "Camera").
 
 Configure and build as usual for Haiku (x86_64), in `generated.x86_64`:
 `jam -q -j<cores> @nightly-anyboot`, or single targets such as
-`facetimehd.hpkg`, `apple_spi_input.hpkg`, `hda`.
+`facetimehd.hpkg`, `apple_spi_input.hpkg`, `apfs.hpkg`, `apfs`, `hda`.
+APFS test shell (runs the driver on macOS against an image file):
+`jam -q '<build>apfs_shell'`, then
+`objects/darwin/arm64/release/tests/add-ons/kernel/file_systems/apfs/apfs_shell/apfs_shell <image>`
+(`APFS_VOLUME=<index|name>` picks a volume).
+
+Disk space: `/Volumes/Source` is an 18 GB image and fills up; on
+2026-11-25 builds failed with 112 MB free. Keep large test images
+elsewhere (the APFS ones are on "NEW FAT VOL" in `apfs-test/`).
 
 Build host gotcha (macOS): host tools under `generated.x86_64/objects/darwin`
 can stay linked to a library that is gone (in November they pointed at
@@ -59,7 +88,7 @@ Done once on 2026-11-25 by merging (not rebasing, so pushed history stays):
 ```
 git fetch origin
 git branch -f main origin/main
-git switch apple-spi-input
+git switch apfs
 git merge --no-ff origin/main
 ```
 
@@ -96,6 +125,11 @@ Build, test the nightly on the MacBook, then commit the merge.
   preferences app (built, NOT yet tested), package `facetimehd.hpkg`.
 - Merged RenkuOS `main` (711 commits) on 2026-11-25; nightly tested on
   the MacBook, including a fresh install with the camera files built in.
+- APFS, read-only (branch `apfs`, 5 commits; see apfs-readonly-design.md):
+  containers and volumes, folders, files, symlinks, hard links, extended
+  attributes, compressed files (LZVN, LZFSE, zlib), programs run from
+  APFS, free space as macOS reports it; package `apfs.hpkg` (optional
+  image package APFS). Tested on images and on two 4 TB macOS SSDs.
 
 ## Camera: files the user must supply
 
@@ -125,12 +159,23 @@ again after reflashing. Never commit them.
 7. Wi-Fi (BCM4350): researched only, on hold; see wifi-bcm4350-plan.md.
 8. After the merge, check the internal microphone and the input selector
    (upstream reworked hda mux controls) and display moves on Kaby Lake.
-9. APFS read-only file system: design written, not started; see
-   apfs-readonly-design.md.
+9. APFS: names typed in a different Unicode normalization than macOS
+   stored (needs NFD and case-folding tables in the kernel); compressed
+   files of type 4 (zlib in a classic resource fork, Mac OS X 10.6-10.10,
+   refused today); snapshots; FileVault volumes; write support.
 
 ## Notes in this branch
 
 - camera-facetimehd-design.md: camera hardware, sources, phase results.
 - sound-cs8409-design.md: CS8409 audio design and provenance.
 - wifi-bcm4350-plan.md: Wi-Fi plan (on hold).
-- apfs-readonly-design.md: APFS read-only file system design (not started).
+- apfs-readonly-design.md: APFS driver design, results, and the places
+  where real volumes differ from Apple's reference.
+
+## APFS test images
+
+On "NEW FAT VOL" in `apfs-test/` (plain, multi, stress, attrs, comp),
+with a README of MacBook test steps. `make_test_images.sh` in
+`src/tests/add-ons/kernel/file_systems/apfs/` rebuilds them on a Mac
+(comp.dmg by hand, as described there). Attach test images on the Mac
+only with `hdiutil attach -readonly`: a normal mount changes them.
