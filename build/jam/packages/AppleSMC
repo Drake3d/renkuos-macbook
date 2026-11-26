@@ -1,0 +1,11 @@
+# Apple SMC sensors (temperatures and fan speeds of Intel Macs), as a
+# package of its own for x86: the apple_smc driver for the ACPI device
+# APP0001. Read only. It needs no change to the kernel, so it can be
+# installed on a stock system.
+
+local appleSMCPackage = apple_smc.hpkg ;
+HaikuPackage $(appleSMCPackage) ;
+
+AddNewDriversToPackage sensor : apple_smc ;
+
+BuildHaikuPackage $(appleSMCPackage) : apple_smc ;

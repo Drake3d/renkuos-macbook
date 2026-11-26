@@ -1,0 +1,25 @@
+name			apple_smc
+version			%HAIKU_VERSION%
+architecture	%HAIKU_PACKAGING_ARCH%
+summary			"Apple SMC sensors: temperatures and fan speeds"
+
+description		"Reads the System Management Controller of Intel Macs: the \
+temperatures and fan speeds (current, minimum and maximum). Read only; \
+the SMC keeps controlling the fans. The readings are in \
+/dev/sensor/apple_smc/0 and, once at boot, in the syslog."
+
+packager		"The Haiku build system"
+vendor			"RenkuOS"
+
+copyrights		{
+	"2026 RenkuOS Contributors"
+}
+licenses		"MIT"
+
+provides {
+	apple_smc = %HAIKU_VERSION%
+}
+
+requires {
+	haiku
+}
