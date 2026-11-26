@@ -1,5 +1,6 @@
 SubDir HAIKU_TOP src tests add-ons kernel file_systems ;
 
+HaikuSubInclude apfs ;
 HaikuSubInclude bfs ;
 HaikuSubInclude btrfs ;
 HaikuSubInclude cdda ;
