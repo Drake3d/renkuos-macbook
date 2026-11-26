@@ -26,12 +26,16 @@ images made by macOS (section 11).
   used by App Store apps. Layout checked against 54 real files (PCalc.app);
   all 1129 files of a macOS copy of PCalc.app read back identical, in
   apfs_shell and on the MacBook.
+- Unicode names (bd51ec5568, 2026-11-26): names compare and hash as their
+  NFD, after full case folding on case-insensitive volumes (section 5).
+  400 lookups (NFC/NFD, upper/lower/folded case, both kinds of volume)
+  answer as macOS does, in apfs_shell and on the MacBook.
 - Tested on real drives: two 4 TB macOS APFS SSDs (largest: 82040 files,
   8809-node tree), movie playback, running programs.
 
-Open: non-ASCII names in other normalization forms (needs Unicode NFD and
-case-folding tables in the kernel), snapshots, encrypted volumes, write
-support.
+Open: sealed volumes (macOS 11+ System volumes; their tree nodes fail the
+checksum check), encrypted volumes, write support. Snapshots skipped by
+choice (started code in working/apfs-snapshots-shelved.patch).
 
 Goal of this stage: mount unencrypted APFS volumes read-only in RenkuOS and
 read every file, directory, symlink and attribute on them, including
@@ -150,6 +154,16 @@ volume whose role is none/data, **verify** role values).
   Plan: generate compact tables from the Unicode data files (Unicode
   license, permissive) with a build-time script; do not copy tables from
   GPL code.
+- Done (bd51ec5568). What macOS does, worked out from the hashes it stored
+  for 61 names in many scripts: case-insensitive volumes use full case
+  folding (CaseFolding.txt C and F: "ß" -> "ss", "ﬁ" -> "fi"), then
+  standard NFD; case-sensitive volumes use NFD alone; no HFS+ style
+  exclusions (CJK compatibility ideographs decompose). The hash is a
+  CRC-32C over the code points as UTF-32 LE, no final null, started at ~0,
+  not complemented, 22 bits. Unicode.cpp does it; UnicodeTables.h (about
+  58 KB) comes from src/tests/.../apfs/gen_unicode_tables.py (Python's
+  unicodedata, Unicode 16). Names that are not valid UTF-8 are matched
+  byte for byte.
 - Fallback for the first milestone: exact-byte comparison plus a linear
   scan of the directory when the hashed lookup misses, so lookups work
   before the tables are done.

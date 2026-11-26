@@ -10,9 +10,10 @@ camera work and the built-in Wi-Fi).
 - Code: github.com/Drake3d/renkuos-macbook.
   - `wifi` (work here): `apfs` plus 3 camera commits (settings kept across
     restarts, idle power-down, picture sizes/mirror/CodyCam settings) and
-    4 Wi-Fi commits, then the microphone gain commit (`e707a92fb1`) and
-    APFS type 4 compression. Tip: `9b7dae4981` "apfs: read compressed
-    files of type 4 (zlib in a resource fork)". Pushed 2026-11-26.
+    4 Wi-Fi commits, then the microphone gain commit (`e707a92fb1`), APFS
+    type 4 compression (`9b7dae4981`) and APFS Unicode names. Tip:
+    `bd51ec5568` "apfs: compare and hash file names as macOS does
+    (Unicode)". Pushed 2026-11-26.
   - `apfs`: `apple-spi-input` plus the APFS driver, milestones 1-5
     (`personal/apfs` tip `8d6d75b8a4`). The 3 camera commits sit on the
     local `apfs` too but were pushed only as part of `wifi`.
@@ -194,7 +195,8 @@ Build, test the nightly on the MacBook, then commit the merge.
 - APFS, read-only (branch `apfs`, 5 commits; see apfs-readonly-design.md):
   containers and volumes, folders, files, symlinks, hard links, extended
   attributes, compressed files (every decmpfs type: LZVN, LZFSE, zlib,
-  type 4 since `9b7dae4981`), programs run from
+  type 4 since `9b7dae4981`), names in any Unicode form and, on
+  case-insensitive volumes, any case (`bd51ec5568`), programs run from
   APFS, free space as macOS reports it; package `apfs.hpkg` (optional
   image package APFS). Tested on images and on two 4 TB macOS SSDs.
 - Built-in Wi-Fi, BCM4350 (branch `wifi`, 4 commits; see
@@ -282,9 +284,15 @@ them.
    non-packaged plus `/boot/system/settings/packages` hiding the haiku
    package's hda). Run its `uninstall.sh` and reboot when an image with
    `e707a92fb1` is installed.
-7. APFS: names typed in a different Unicode normalization than macOS
-   stored (needs NFD and case-folding tables in the kernel); snapshots;
-   FileVault volumes; write support.
+7. APFS: sealed volumes (every macOS 11+ System volume, and the cryptex
+   images in Preboot) do not mount: their file-system tree nodes fail the
+   checksum check ("bad checksum in block ..."), as sealed trees are
+   protected by hashes instead; data volumes are not sealed. FileVault
+   volumes; write support. Snapshots were skipped by choice (unlikely to
+   be needed on RenkuOS); the started code (listing them at mount, a
+   "snapshot=" mount option) is in working/apfs-snapshots-shelved.patch,
+   untested: macOS will not create snapshots on disk images, even as root
+   (fs_snapshot_create needs an Apple entitlement).
 
 ## Notes in this branch
 
