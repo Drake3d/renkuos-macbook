@@ -1,0 +1,89 @@
+/*
+ * Copyright 2026, RenkuOS Contributors
+ * Copyright (c) 2010-2016 Broadcom Corporation
+ * Copyright (c) 2017 Patrick Wildt <patrick@blueri.se>
+ * SPDX-License-Identifier: ISC
+ *
+ * Permission to use, copy, modify, and/or distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ */
+
+/*
+ * PCIe core registers and the layout of the shared area the firmware sets
+ * up, as in OpenBSD's if_bwfm_pci.h (1.9).
+ */
+#ifndef BRCMF_PCIE_REGS_H
+#define BRCMF_PCIE_REGS_H
+
+
+// PCIe core registers (offsets in its window)
+enum {
+	PCIE2_INTMASK			= 0x024,
+	PCIE2_MAILBOXINT		= 0x048,
+	PCIE2_MAILBOXMASK		= 0x04c,
+		MAILBOX_INT_FN0_0		= 0x0100,
+		MAILBOX_INT_FN0_1		= 0x0200,
+		MAILBOX_INT_D2H_DB		= 0x00ff0000,	// D2H0-3, DB0 and DB1
+	PCIE2_CONFIGADDR		= 0x120,
+	PCIE2_CONFIGDATA		= 0x124,
+	PCIE2_H2D_MAILBOX_0		= 0x140,	// doorbell: new submissions
+	PCIE2_H2D_MAILBOX_1		= 0x144,	// doorbell: host ready
+	PCIE2_64_INTMASK		= 0xc14,
+	PCIE2_64_MAILBOXINT		= 0xc30,
+	PCIE2_64_MAILBOXMASK	= 0xc34,
+		MAILBOX_64_INT_D2H_DB	= 0xffff,
+};
+
+// Shared area the firmware sets up
+enum {
+	SHARED_INFO					= 0x00,
+		SHARED_INFO_VERSION_MASK	= 0x00ff,
+		SHARED_INFO_DMA_INDEX		= 0x10000,
+		SHARED_INFO_DMA_2B_IDX		= 0x100000,
+		SHARED_INFO_USE_MAILBOX		= 0x2000000,
+		SHARED_INFO_HOSTRDY_DB1		= 0x10000000,
+	SHARED_CONSOLE_ADDR			= 0x14,
+	SHARED_MAX_RXBUFPOST		= 0x22,
+	SHARED_RX_DATAOFFSET		= 0x24,
+	SHARED_HTOD_MB_DATA_ADDR	= 0x28,
+	SHARED_DTOH_MB_DATA_ADDR	= 0x2c,
+	SHARED_RING_INFO_ADDR		= 0x30,
+	SHARED_DMA_SCRATCH_LEN		= 0x34,
+	SHARED_DMA_SCRATCH_ADDR_LOW	= 0x38,
+	SHARED_DMA_SCRATCH_ADDR_HIGH = 0x3c,
+	SHARED_DMA_RINGUPD_LEN		= 0x40,
+	SHARED_DMA_RINGUPD_ADDR_LOW	= 0x44,
+	SHARED_DMA_RINGUPD_ADDR_HIGH = 0x48,
+
+	// ring info
+	RINGINFO_RINGMEM			= 0x00,
+	RINGINFO_H2D_W_IDX_PTR		= 0x04,
+	RINGINFO_H2D_R_IDX_PTR		= 0x08,
+	RINGINFO_D2H_W_IDX_PTR		= 0x0c,
+	RINGINFO_D2H_R_IDX_PTR		= 0x10,
+	RINGINFO_MAX_FLOWRINGS		= 0x34,
+	RINGINFO_MAX_SUBMISSION		= 0x36,
+	RINGINFO_MAX_COMPLETION		= 0x38,
+
+	// ring memory descriptor, one per ring
+	RING_MAX_ITEM				= 0x04,
+	RING_LEN_ITEMS				= 0x06,
+	RING_BASE_ADDR_LOW			= 0x08,
+	RING_BASE_ADDR_HIGH			= 0x0c,
+	RING_DESCRIPTOR_SIZE		= 16,
+
+	CONSOLE_BUFADDR				= 0x08,
+	CONSOLE_BUFSIZE				= 0x0c,
+	CONSOLE_WRITEIDX			= 0x10,
+};
+
+#endif	// BRCMF_PCIE_REGS_H

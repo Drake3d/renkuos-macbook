@@ -140,7 +140,9 @@ struct fthd_device {
 	uint32			sensor_width;
 	uint32			sensor_height;
 	uint32			set_file;			// S2 MEM offset, 0 if not loaded
+	bool			set_file_seen;		// loaded at least once (for info)
 	int32			controls[FTHD_CONTROL_COUNT];
+	uint8*			mirror_row;			// one row, for mirrored copies
 
 	// streaming (stream.cpp)
 	mutex			stream_lock;
@@ -157,6 +159,13 @@ struct fthd_device {
 	uint32			sequence;
 	int32			frames_received;
 	bigtime_t		stream_start;
+
+	// power (driver.cpp): the processor and sensor are switched off after
+	// FTHD_IDLE_DELAY without a stream, and on again for the next one
+	thread_id		power_thread;
+	sem_id			power_sem;
+	volatile bool	power_thread_quit;
+	bigtime_t		last_used;
 };
 
 
@@ -258,6 +267,7 @@ status_t	fthd_memory_reserve(fthd_device* device, uint32 offset,
 status_t	fthd_memory_alloc(fthd_device* device, uint32 size,
 				uint32* _offset);
 void		fthd_memory_free(fthd_device* device, uint32 offset);
+void		fthd_memory_free_all(fthd_device* device);
 void		fthd_memory_copy_to(fthd_device* device, uint32 offset,
 				const void* buffer, size_t length);
 void		fthd_memory_copy_from(fthd_device* device, uint32 offset,
@@ -266,6 +276,10 @@ void		fthd_memory_copy_from(fthd_device* device, uint32 offset,
 // isp.cpp
 status_t	fthd_isp_init(fthd_device* device);
 void		fthd_isp_uninit(fthd_device* device);
+
+// Called with stream_lock held.
+status_t	fthd_power_up(fthd_device* device);
+void		fthd_power_down(fthd_device* device);
 status_t	fthd_isp_command(fthd_device* device, uint16 opcode,
 				const void* request, size_t requestLength, void* response,
 				size_t responseLength);
@@ -284,7 +298,9 @@ status_t	fthd_copy_file_to_memory(fthd_device* device, int fd,
 void		fthd_stream_init(fthd_device* device);
 void		fthd_stream_uninit(fthd_device* device);
 void		fthd_stream_query_sensor(fthd_device* device);
-status_t	fthd_stream_start(fthd_device* device);
+status_t	fthd_stream_start(fthd_device* device, uint32 width,
+				uint32 height);
+bool		fthd_control_value_valid(uint32 id, int32 value);
 void		fthd_stream_stop(fthd_device* device);
 status_t	fthd_stream_set_control(fthd_device* device, uint32 id,
 				int32 value);

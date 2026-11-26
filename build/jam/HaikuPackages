@@ -3,6 +3,7 @@
 local packages = [ FFilterByBuildFeatures
 	APFS
 	AppleSPIInput@x86,x86_64
+	BroadcomWifi@x86,x86_64
 	FaceTimeHD@x86,x86_64
 	HaikuDevel
 	HaikuDataTranslators

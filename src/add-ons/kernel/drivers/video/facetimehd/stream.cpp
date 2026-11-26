@@ -31,6 +31,7 @@
 #include <unistd.h>
 #include <string.h>
 
+#include <driver_settings.h>
 #include <util/AutoLock.h>
 
 
@@ -93,8 +94,6 @@
 // output pixel format: 1 = YUYV
 #define PIXEL_FORMAT_YUYV		1
 
-#define STREAM_WIDTH			1280
-#define STREAM_HEIGHT			720
 
 
 // #pragma mark - frame buffers [F]
@@ -197,6 +196,75 @@ read32(const uint8* data, size_t offset)
 // #pragma mark - sensor
 
 
+bool
+fthd_control_value_valid(uint32 id, int32 value)
+{
+	switch (id) {
+		case FTHD_CONTROL_AUTO_WHITE_BALANCE:
+		case FTHD_CONTROL_LOW_LIGHT:
+		case FTHD_CONTROL_MIRROR:
+			return value == 0 || value == 1;
+		case FTHD_CONTROL_WIDTH:
+			return value >= FTHD_MIN_WIDTH && value <= FTHD_MAX_WIDTH
+				&& (value & 1) == 0;
+		case FTHD_CONTROL_HEIGHT:
+			return value >= FTHD_MIN_HEIGHT && value <= FTHD_MAX_HEIGHT
+				&& (value & 1) == 0;
+		default:
+			return id < FTHD_CONTROL_COUNT && value >= 0 && value <= 255;
+	}
+}
+
+
+/*!	Takes the picture settings the Camera preferences saved (see
+	facetimehd_ioctl.h); values out of range are ignored.
+*/
+static void
+load_saved_controls(fthd_device* device)
+{
+	void* settings = load_driver_settings(FTHD_SETTINGS_NAME);
+	if (settings == NULL) {
+		FTHD_LOG("no saved picture settings (%s), using the defaults\n",
+			"~/config/settings/kernel/drivers/" FTHD_SETTINGS_NAME);
+		return;
+	}
+
+	int32 loaded = 0;
+	for (uint32 id = 0; id < FTHD_CONTROL_COUNT; id++) {
+		const char* text = get_driver_parameter(settings,
+			kFTHDControlNames[id], NULL, NULL);
+		if (text == NULL)
+			continue;
+
+		char* end;
+		long value = strtol(text, &end, 10);
+		if (end == text || *end != '\0'
+			|| !fthd_control_value_valid(id, value)) {
+			FTHD_LOG("saved setting %s=%s ignored\n", kFTHDControlNames[id],
+				text);
+			continue;
+		}
+		device->controls[id] = value;
+		loaded++;
+	}
+	unload_driver_settings(settings);
+
+	FTHD_LOG("picture settings: brightness %" B_PRId32 ", contrast %" B_PRId32
+		", saturation %" B_PRId32 ", hue %" B_PRId32 ", white balance %s, "
+		"low light %s, mirror %s, size %" B_PRId32 "x%" B_PRId32 " (%"
+		B_PRId32 " saved)\n",
+		device->controls[FTHD_CONTROL_BRIGHTNESS],
+		device->controls[FTHD_CONTROL_CONTRAST],
+		device->controls[FTHD_CONTROL_SATURATION],
+		device->controls[FTHD_CONTROL_HUE],
+		device->controls[FTHD_CONTROL_AUTO_WHITE_BALANCE] != 0 ? "auto" : "off",
+		device->controls[FTHD_CONTROL_LOW_LIGHT] != 0 ? "on" : "off",
+		device->controls[FTHD_CONTROL_MIRROR] != 0 ? "on" : "off",
+		device->controls[FTHD_CONTROL_WIDTH],
+		device->controls[FTHD_CONTROL_HEIGHT], loaded);
+}
+
+
 void
 fthd_stream_init(fthd_device* device)
 {
@@ -205,8 +273,8 @@ fthd_stream_init(fthd_device* device)
 	mutex_init(&device->frame_lock, "facetimehd frames");
 	device->frame_sem = create_sem(0, "facetimehd frames");
 	device->frame_area = -1;
-	device->width = STREAM_WIDTH;
-	device->height = STREAM_HEIGHT;
+	device->width = FTHD_DEFAULT_WIDTH;
+	device->height = FTHD_DEFAULT_HEIGHT;
 
 	// the Linux driver's defaults [F]
 	device->controls[FTHD_CONTROL_BRIGHTNESS] = 128;
@@ -215,6 +283,12 @@ fthd_stream_init(fthd_device* device)
 	device->controls[FTHD_CONTROL_HUE] = 128;
 	device->controls[FTHD_CONTROL_AUTO_WHITE_BALANCE] = 1;
 	device->controls[FTHD_CONTROL_LOW_LIGHT] = 0;
+	device->controls[FTHD_CONTROL_MIRROR] = 1;
+	device->controls[FTHD_CONTROL_WIDTH] = FTHD_DEFAULT_WIDTH;
+	device->controls[FTHD_CONTROL_HEIGHT] = FTHD_DEFAULT_HEIGHT;
+	device->mirror_row = (uint8*)malloc(FTHD_MAX_WIDTH * 2);
+
+	load_saved_controls(device);
 }
 
 
@@ -224,6 +298,8 @@ fthd_stream_uninit(fthd_device* device)
 	if (device->frame_sem >= 0)
 		delete_sem(device->frame_sem);
 	device->frame_sem = -1;
+	free(device->mirror_row);
+	device->mirror_row = NULL;
 	mutex_destroy(&device->frame_lock);
 	mutex_destroy(&device->stream_lock);
 	mutex_destroy(&device->command_lock);
@@ -325,6 +401,7 @@ fthd_stream_query_sensor(fthd_device* device)
 
 	// the firmware keeps using it, so it stays
 	device->set_file = offset;
+	device->set_file_seen = true;
 	FTHD_LOG("loaded set file %s, %" B_PRIuSIZE " bytes\n", path, size);
 }
 
@@ -352,6 +429,13 @@ apply_control(fthd_device* device, uint32 id, int32 value)
 		case FTHD_CONTROL_LOW_LIGHT:
 			return channel_command(device, CMD_CH_AE_FRAME_RATE_MIN_SET,
 				value != 0 ? FRAME_RATE_LOW_LIGHT : FRAME_RATE);
+		case FTHD_CONTROL_MIRROR:
+			// done while copying frames out (copy_frame())
+			return B_OK;
+		case FTHD_CONTROL_WIDTH:
+		case FTHD_CONTROL_HEIGHT:
+			// used when a device is opened (driver.cpp)
+			return B_OK;
 	}
 	return B_BAD_VALUE;
 }
@@ -362,9 +446,10 @@ fthd_stream_set_control(fthd_device* device, uint32 id, int32 value)
 {
 	if (id >= FTHD_CONTROL_COUNT)
 		return B_BAD_VALUE;
-	if (id == FTHD_CONTROL_AUTO_WHITE_BALANCE || id == FTHD_CONTROL_LOW_LIGHT)
+	if (id == FTHD_CONTROL_AUTO_WHITE_BALANCE || id == FTHD_CONTROL_LOW_LIGHT
+		|| id == FTHD_CONTROL_MIRROR)
 		value = value != 0 ? 1 : 0;
-	else if (value < 0 || value > 255)
+	if (!fthd_control_value_valid(id, value))
 		return B_BAD_VALUE;
 
 	MutexLocker locker(device->stream_lock);
@@ -676,13 +761,20 @@ stop_channel(fthd_device* device)
 
 
 status_t
-fthd_stream_start(fthd_device* device)
+fthd_stream_start(fthd_device* device, uint32 width, uint32 height)
 {
 	MutexLocker locker(device->stream_lock);
-	if (!device->isp_up)
-		return B_NO_INIT;
 	if (device->streaming)
 		return B_BUSY;
+
+	device->width = width;
+	device->height = height;
+
+	// The camera is switched off while unused (see fthd_power_down()).
+	status_t powerStatus = fthd_power_up(device);
+	if (powerStatus != B_OK)
+		return powerStatus;
+	device->last_used = system_time();
 
 	device->frame_size = (device->width * device->height * 2 + B_PAGE_SIZE
 		- 1) & ~(size_t)(B_PAGE_SIZE - 1);
@@ -744,6 +836,7 @@ fthd_stream_stop(fthd_device* device)
 	}
 
 	device->streaming = false;
+	device->last_used = system_time();
 	bigtime_t duration = system_time() - device->stream_start;
 	int32 frames = atomic_get(&device->frames_received);
 	FTHD_LOG("stream stopped: %" B_PRId32 " frames in %" B_PRId64 " ms "
@@ -751,6 +844,43 @@ fthd_stream_stop(fthd_device* device)
 		duration > 0 ? (int64)frames * 1000000 / duration : 0,
 		duration > 0 ? ((int64)frames * 10000000 / duration) % 10 : 0);
 	unmap_frames(device);
+}
+
+
+/*!	Copies a YUYV frame to the reader's buffer, mirrored if the mirror
+	control is on. YUYV keeps two pixels in four bytes (Y0 U Y1 V) that
+	share their colour, so mirroring reverses the pairs and swaps Y0 and Y1
+	in each.
+*/
+static status_t
+copy_frame(fthd_device* device, const uint8* source, uint8* target)
+{
+	uint32 width = device->width;
+	uint32 height = device->height;
+	size_t rowBytes = width * 2;
+
+	if (device->controls[FTHD_CONTROL_MIRROR] == 0)
+		return user_memcpy(target, source, rowBytes * height);
+
+	uint8* row = device->mirror_row;
+	if (row == NULL)
+		return user_memcpy(target, source, rowBytes * height);
+
+	for (uint32 y = 0; y < height; y++) {
+		const uint8* from = source + y * rowBytes;
+		for (uint32 x = 0; x < width; x += 2) {
+			const uint8* pair = from + x * 2;
+			uint8* to = row + (width - 2 - x) * 2;
+			to[0] = pair[2];
+			to[1] = pair[1];
+			to[2] = pair[0];
+			to[3] = pair[3];
+		}
+		status_t status = user_memcpy(target + y * rowBytes, row, rowBytes);
+		if (status != B_OK)
+			return status;
+	}
+	return B_OK;
 }
 
 
@@ -803,8 +933,8 @@ fthd_stream_read_frame(fthd_device* device, void* buffer, size_t bufferSize,
 	}
 
 	fthd_frame& frame = device->frames[newest];
-	status_t status = user_memcpy(buffer,
-		device->frame_memory + newest * device->frame_size, imageSize);
+	status_t status = copy_frame(device,
+		device->frame_memory + newest * device->frame_size, (uint8*)buffer);
 	*_sequence = frame.sequence;
 	*_time = frame.time;
 

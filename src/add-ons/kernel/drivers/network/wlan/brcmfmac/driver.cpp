@@ -10,10 +10,15 @@
  *
  * Written for Haiku/RenkuOS. The chip-side behaviour it relies on is
  * described in brcmf.cpp, together with the acknowledgements.
+ *
+ * Two buses: SDIO on the Raspberry Pi 4/400 (ACPI device "BCM2847"), and
+ * PCIe (brcmf_pcie*.cpp), whose msgbuf protocol carries the same Wi-Fi
+ * logic (Brcmf) through BrcmfTransport.
  */
 
 
 #include "brcmfmac.h"
+#include "brcmf_pcie.h"
 
 #include <net/if.h>
 #include <net/if_media.h>
@@ -55,6 +60,7 @@ struct brcmf_info {
 	uint32			irq;
 	SdioHost*		host;
 	Brcmf*			brcmf;
+	BrcmfPcie*		pcie;
 	mutex			startLock;
 	int32			deviceId;
 	bool			nonblocking;
@@ -513,6 +519,13 @@ brcmf_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 				state.media |= IFM_ACTIVE;
 				state.quality = 1000;
 				state.speed = 72000000;
+				if (brcmf->UpdateLinkInfo() == B_OK) {
+					// quality in 1/10 %, from -100 dBm (0) to -50 dBm (100 %)
+					int32 percent = 2 * (brcmf->Rssi() + 100);
+					state.quality = max_c(0, min_c(percent, 100)) * 10;
+					if (brcmf->RateKbps() != 0)
+						state.speed = (uint64)brcmf->RateKbps() * 1000;
+				}
 			} else {
 				state.quality = 0;
 				state.speed = 0;
@@ -605,9 +618,48 @@ brcmf_parse_crs(ACPI_RESOURCE* resource, void* context)
 }
 
 
+// PCIe chips with a known firmware name (see BrcmfPcie::_FirmwareName())
+static const uint16 kPcieDevices[] = {
+	0x43a3,		// BCM4350
+};
+static const uint16 kBroadcomVendor = 0x14e4;
+
+
+static bool
+is_pci_parent(device_node* parent)
+{
+	const char* bus;
+	return sDeviceManager->get_attr_string(parent, B_DEVICE_BUS, &bus, false)
+			== B_OK && strcmp(bus, "pci") == 0;
+}
+
+
+static float
+brcmf_supports_pci_device(device_node* parent)
+{
+	uint16 vendor, device;
+	if (sDeviceManager->get_attr_uint16(parent, B_DEVICE_VENDOR_ID, &vendor,
+			false) != B_OK
+		|| sDeviceManager->get_attr_uint16(parent, B_DEVICE_ID, &device,
+			false) != B_OK
+		|| vendor != kBroadcomVendor) {
+		return 0.0f;
+	}
+
+	for (size_t i = 0; i < B_COUNT_OF(kPcieDevices); i++) {
+		if (device == kPcieDevices[i])
+			return 0.8f;
+	}
+	return 0.0f;
+}
+
+
 static float
 brcmf_supports_device(device_node* parent)
 {
+	if (is_pci_parent(parent))
+		return brcmf_supports_pci_device(parent);
+
 	const char* bus;
 	if (sDeviceManager->get_attr_string(parent, B_DEVICE_BUS, &bus, false)
 			!= B_OK || strcmp(bus, "acpi") != 0) {
@@ -634,7 +686,8 @@ brcmf_register_device(device_node* node)
 {
 	device_attr attrs[] = {
 		{ B_DEVICE_PRETTY_NAME, B_STRING_TYPE,
-			{ .string = "Broadcom FullMAC SDIO WLAN" }},
+			{ .string = is_pci_parent(node) ? "Broadcom FullMAC PCIe WLAN"
+				: "Broadcom FullMAC SDIO WLAN" }},
 		{ NULL }
 	};
 
@@ -648,12 +701,47 @@ brcmf_free_info(brcmf_info* info)
 {
 	if (info->irq != 0 && info->host != NULL)
 		remove_io_interrupt_handler(info->irq, brcmf_interrupt, info);
+	// The PCIe service thread calls into Brcmf; stop it first.
+	if (info->pcie != NULL)
+		info->pcie->Stop();
 	delete info->brcmf;
 	delete info->host;
+	delete info->pcie;
 	if (info->registerArea >= 0)
 		delete_area(info->registerArea);
 	mutex_destroy(&info->startLock);
 	delete info;
+}
+
+
+/*!	PCIe: maps the card and brings its firmware up. */
+static status_t
+brcmf_init_pci(brcmf_info* info)
+{
+	device_node* pciNode = sDeviceManager->get_parent_node(info->node);
+	pci_device_module_info* pci;
+	pci_device* device;
+	sDeviceManager->get_driver(pciNode, (driver_module_info**)&pci,
+		(void**)&device);
+	sDeviceManager->put_node(pciNode);
+
+	info->pcie = new(std::nothrow) BrcmfPcie(pci, device);
+	if (info->pcie == NULL)
+		return B_NO_MEMORY;
+
+	status_t status = info->pcie->Init();
+	if (status == B_OK)
+		status = info->pcie->Start();
+	if (status != B_OK) {
+		ERROR("PCIe bring-up failed: %s\n", strerror(status));
+		return status;
+	}
+
+	info->brcmf = new(std::nothrow) Brcmf(NULL, info->pcie);
+	if (info->brcmf == NULL)
+		return B_NO_MEMORY;
+	info->pcie->SetReceiver(info->brcmf);
+	return info->brcmf->Probe();
 }
 
 
@@ -668,6 +756,19 @@ brcmf_init_driver(device_node* node, void** _cookie)
 	info->registerArea = -1;
 	info->deviceId = -1;
 	mutex_init(&info->startLock, "brcmfmac start");
+
+	device_node* parent = sDeviceManager->get_parent_node(node);
+	bool pciBus = is_pci_parent(parent);
+	sDeviceManager->put_node(parent);
+	if (pciBus) {
+		status_t status = brcmf_init_pci(info);
+		if (status != B_OK) {
+			brcmf_free_info(info);
+			return B_DEVICE_NOT_FOUND;
+		}
+		*_cookie = info;
+		return B_OK;
+	}
 
 	device_node* acpiNode = sDeviceManager->get_parent_node(node);
 	acpi_device_module_info* acpi;
@@ -758,8 +859,10 @@ brcmf_uninit_driver(void* _cookie)
 	brcmf_info* info = (brcmf_info*)_cookie;
 	if (info->deviceId >= 0)
 		sDeviceManager->free_id(BRCMF_DEVICE_ID_GENERATOR, info->deviceId);
+	bool sdio = info->host != NULL;
 	brcmf_free_info(info);
-	vc_set_gpio(kWifiPowerGpio, 0);
+	if (sdio)
+		vc_set_gpio(kWifiPowerGpio, 0);
 }
 
 

@@ -58,7 +58,8 @@ Decmpfs::Decmpfs(Inode* inode)
 	fHeaderSize(0),
 	fHeaderAllocated(false),
 	fFork(NULL),
-	fOffsets(NULL),
+	fChunkOffsets(NULL),
+	fChunkSizes(NULL),
 	fChunk(NULL),
 	fChunkIndex(kNoChunk),
 	fChunkLength(0),
@@ -76,7 +77,8 @@ Decmpfs::~Decmpfs()
 		free(fHeaderData);
 	free(fHeader);
 	free(fFork);
-	free(fOffsets);
+	free(fChunkOffsets);
+	free(fChunkSizes);
 	free(fChunk);
 	free(fInput);
 	free(fScratch);
@@ -97,8 +99,8 @@ Decmpfs::_InAttribute() const
 bool
 Decmpfs::IsSupported() const
 {
-	return _InAttribute() || fType == APFS_DECMPFS_LZVN_FORK
-		|| fType == APFS_DECMPFS_LZFSE_FORK;
+	return _InAttribute() || fType == APFS_DECMPFS_ZLIB_FORK
+		|| fType == APFS_DECMPFS_LZVN_FORK || fType == APFS_DECMPFS_LZFSE_FORK;
 }
 
 
@@ -203,47 +205,141 @@ Decmpfs::_PrepareBuffers()
 status_t
 Decmpfs::_LoadOffsets()
 {
-	if (fOffsets != NULL)
+	if (fChunkOffsets != NULL)
 		return B_OK;
 
-	fFork = (apfs_attribute*)malloc(sizeof(apfs_attribute));
-	if (fFork == NULL)
-		return B_NO_MEMORY;
-	status_t status = fInode->FindAttribute(APFS_RESOURCE_FORK_NAME, fFork);
-	if (status != B_OK) {
-		ERROR("inode %" B_PRIdINO ": compressed, but no resource fork\n",
-			fInode->ID());
-		return B_BAD_DATA;
+	if (fFork == NULL) {
+		fFork = (apfs_attribute*)malloc(sizeof(apfs_attribute));
+		if (fFork == NULL)
+			return B_NO_MEMORY;
+		status_t status = fInode->FindAttribute(APFS_RESOURCE_FORK_NAME,
+			fFork);
+		if (status != B_OK) {
+			ERROR("inode %" B_PRIdINO ": compressed, but no resource fork\n",
+				fInode->ID());
+			free(fFork);
+			fFork = NULL;
+			return B_BAD_DATA;
+		}
 	}
 
 	uint32 count = _ChunkCount();
-	size_t tableSize = (count + 1) * sizeof(uint32);
-	fOffsets = (uint32*)malloc(tableSize);
-	if (fOffsets == NULL)
+	fChunkOffsets = (uint32*)malloc(count * sizeof(uint32) + 1);
+	fChunkSizes = (uint32*)malloc(count * sizeof(uint32) + 1);
+	if (fChunkOffsets == NULL || fChunkSizes == NULL) {
+		free(fChunkOffsets);
+		free(fChunkSizes);
+		fChunkOffsets = fChunkSizes = NULL;
 		return B_NO_MEMORY;
+	}
 
-	size_t length = tableSize;
-	status = fInode->ReadAttribute(*fFork, 0, fOffsets, &length);
-	if (status == B_OK && length != tableSize)
-		status = B_BAD_DATA;
+	status_t status = fType == APFS_DECMPFS_ZLIB_FORK
+		? _LoadClassicFork(count) : _LoadOffsetTable(count);
 
-	// Offsets grow, the first is the table size, the last fits the fork,
-	// and no chunk is bigger than a raw chunk.
-	for (uint32 i = 0; status == B_OK && i <= count; i++) {
-		fOffsets[i] = B_LENDIAN_TO_HOST_INT32(fOffsets[i]);
-		if ((i == 0 && fOffsets[0] != tableSize)
-			|| (i > 0 && (fOffsets[i] < fOffsets[i - 1]
-				|| fOffsets[i] - fOffsets[i - 1] > kChunkSize + 64))
-			|| fOffsets[i] > fFork->size)
+	// Every chunk lies in the fork and is no bigger than a raw chunk.
+	for (uint32 i = 0; status == B_OK && i < count; i++) {
+		if (fChunkSizes[i] > kChunkSize + 64
+			|| fChunkOffsets[i] > fFork->size
+			|| fChunkSizes[i] > fFork->size - fChunkOffsets[i])
 			status = B_BAD_DATA;
 	}
 
 	if (status != B_OK) {
-		ERROR("inode %" B_PRIdINO ": bad compressed chunk table\n",
-			fInode->ID());
-		free(fOffsets);
-		fOffsets = NULL;
+		ERROR("inode %" B_PRIdINO ": bad compressed chunk table (type %"
+			B_PRIu32 ")\n", fInode->ID(), fType);
+		free(fChunkOffsets);
+		free(fChunkSizes);
+		fChunkOffsets = fChunkSizes = NULL;
 	}
+	return status;
+}
+
+
+//!	Types 8 and 12: offsets from the start of the fork, then the end.
+status_t
+Decmpfs::_LoadOffsetTable(uint32 count)
+{
+	size_t tableSize = (count + 1) * sizeof(uint32);
+	uint32* table = (uint32*)malloc(tableSize);
+	if (table == NULL)
+		return B_NO_MEMORY;
+
+	size_t length = tableSize;
+	status_t status = fInode->ReadAttribute(*fFork, 0, table, &length);
+	if (status == B_OK && length != tableSize)
+		status = B_BAD_DATA;
+
+	// Offsets grow and the first is the table size.
+	for (uint32 i = 0; status == B_OK && i <= count; i++) {
+		table[i] = B_LENDIAN_TO_HOST_INT32(table[i]);
+		if ((i == 0 && table[0] != tableSize)
+			|| (i > 0 && table[i] < table[i - 1]))
+			status = B_BAD_DATA;
+	}
+	for (uint32 i = 0; status == B_OK && i < count; i++) {
+		fChunkOffsets[i] = table[i];
+		fChunkSizes[i] = table[i + 1] - table[i];
+	}
+
+	free(table);
+	return status;
+}
+
+
+//!	Type 4: the 'cmpf' resource of a classic resource fork.
+status_t
+Decmpfs::_LoadClassicFork(uint32 count)
+{
+	uint32 header[4];
+	size_t length = sizeof(header);
+	status_t status = fInode->ReadAttribute(*fFork, 0, header, &length);
+	if (status != B_OK)
+		return status;
+	if (length != sizeof(header))
+		return B_BAD_DATA;
+	uint32 dataOffset = B_BENDIAN_TO_HOST_INT32(header[0]);
+	uint32 dataLength = B_BENDIAN_TO_HOST_INT32(header[2]);
+	if (dataOffset < sizeof(header) || dataLength < 8
+		|| dataOffset > fFork->size || dataLength > fFork->size - dataOffset)
+		return B_BAD_DATA;
+
+	// The resource's length, then its chunk count.
+	uint32 start[2];
+	length = sizeof(start);
+	status = fInode->ReadAttribute(*fFork, dataOffset, start, &length);
+	if (status != B_OK)
+		return status;
+	if (length != sizeof(start))
+		return B_BAD_DATA;
+	uint32 resourceLength = B_BENDIAN_TO_HOST_INT32(start[0]);
+	uint32 resourceCount = B_LENDIAN_TO_HOST_INT32(start[1]);
+	if (resourceLength > dataLength - 4 || resourceCount != count
+		|| resourceLength < 4 + (uint64)count * 8)
+		return B_BAD_DATA;
+
+	size_t tableSize = count * 2 * sizeof(uint32);
+	uint32* table = (uint32*)malloc(tableSize + 1);
+	if (table == NULL)
+		return B_NO_MEMORY;
+	uint32 resource = dataOffset + 4;
+	length = tableSize;
+	status = fInode->ReadAttribute(*fFork, resource + 4, table, &length);
+	if (status == B_OK && length != tableSize)
+		status = B_BAD_DATA;
+
+	for (uint32 i = 0; status == B_OK && i < count; i++) {
+		uint32 offset = B_LENDIAN_TO_HOST_INT32(table[i * 2]);
+		uint32 size = B_LENDIAN_TO_HOST_INT32(table[i * 2 + 1]);
+		if (offset < 4 + count * 8 || offset > resourceLength
+			|| size > resourceLength - offset) {
+			status = B_BAD_DATA;
+			break;
+		}
+		fChunkOffsets[i] = resource + offset;
+		fChunkSizes[i] = size;
+	}
+
+	free(table);
 	return status;
 }
 
@@ -332,6 +428,7 @@ Decmpfs::_Decode(const uint8* input, size_t inputLength, uint8* output,
 			memcpy(output, input, outputLength);
 			return B_OK;
 		case APFS_DECMPFS_ZLIB_ATTRIBUTE:
+		case APFS_DECMPFS_ZLIB_FORK:
 			return _DecodeZlib(input, inputLength, output, outputLength);
 		case APFS_DECMPFS_LZVN_ATTRIBUTE:
 		case APFS_DECMPFS_LZVN_FORK:
@@ -373,9 +470,10 @@ Decmpfs::_LoadChunk(uint32 index)
 	if (index >= _ChunkCount())
 		return B_BAD_VALUE;
 
-	size_t inputLength = fOffsets[index + 1] - fOffsets[index];
+	size_t inputLength = fChunkSizes[index];
 	size_t length = inputLength;
-	status = fInode->ReadAttribute(*fFork, fOffsets[index], fInput, &length);
+	status = fInode->ReadAttribute(*fFork, fChunkOffsets[index], fInput,
+		&length);
 	if (status == B_OK && length != inputLength)
 		status = B_BAD_DATA;
 	if (status != B_OK)
