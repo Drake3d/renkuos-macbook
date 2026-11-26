@@ -509,6 +509,204 @@ struct apfs_superblock {
 } _PACKED;
 
 
+// #pragma mark - File-system records ("File-System Objects", "File-System
+// Constants", "Data Streams", "Extended Fields")
+
+
+// "j_key_t"
+#define APFS_OBJ_ID_MASK				0x0fffffffffffffffULL
+#define APFS_OBJ_TYPE_MASK				0xf000000000000000ULL
+#define APFS_OBJ_TYPE_SHIFT				60
+
+// "j_obj_types"
+#define APFS_TYPE_ANY					0
+#define APFS_TYPE_SNAP_METADATA			1
+#define APFS_TYPE_EXTENT				2
+#define APFS_TYPE_INODE					3
+#define APFS_TYPE_XATTR					4
+#define APFS_TYPE_SIBLING_LINK			5
+#define APFS_TYPE_DSTREAM_ID			6
+#define APFS_TYPE_CRYPTO_STATE			7
+#define APFS_TYPE_FILE_EXTENT			8
+#define APFS_TYPE_DIR_REC				9
+#define APFS_TYPE_DIR_STATS				10
+#define APFS_TYPE_SNAP_NAME				11
+#define APFS_TYPE_SIBLING_MAP			12
+#define APFS_TYPE_FILE_INFO				13
+
+struct apfs_j_key {
+	uint64	obj_id_and_type;
+
+	uint64	ObjectID() const
+		{ return B_LENDIAN_TO_HOST_INT64(obj_id_and_type) & APFS_OBJ_ID_MASK; }
+	uint8	Type() const
+		{ return (B_LENDIAN_TO_HOST_INT64(obj_id_and_type) & APFS_OBJ_TYPE_MASK)
+			>> APFS_OBJ_TYPE_SHIFT; }
+	void	Set(uint64 id, uint8 type)
+		{ obj_id_and_type = B_HOST_TO_LENDIAN_INT64((id & APFS_OBJ_ID_MASK)
+			| ((uint64)type << APFS_OBJ_TYPE_SHIFT)); }
+} _PACKED;
+
+// "j_inode_flags" (internal_flags)
+#define APFS_INODE_IS_APFS_PRIVATE		0x00000001
+#define APFS_INODE_HAS_SECURITY_EA		0x00000040
+#define APFS_INODE_HAS_FINDER_INFO		0x00000100
+#define APFS_INODE_IS_SPARSE			0x00000200
+#define APFS_INODE_HAS_RSRC_FORK		0x00004000
+#define APFS_INODE_HAS_UNCOMPRESSED_SIZE	0x00040000
+
+// BSD flag of a file whose data is compressed (decmpfs). Not in the APFS
+// reference; it is the public UF_COMPRESSED value of the macOS
+// <sys/stat.h>. Reading such files comes with milestone 4.
+#define APFS_BSD_UF_COMPRESSED			0x00000020
+
+// "File Modes" (same values as POSIX)
+#define APFS_S_IFMT						0170000
+#define APFS_S_IFDIR					0040000
+#define APFS_S_IFREG					0100000
+#define APFS_S_IFLNK					0120000
+
+// "j_inode_val_t"
+struct apfs_j_inode_val {
+	uint64	parent_id;
+	uint64	private_id;
+	uint64	create_time;
+	uint64	mod_time;
+	uint64	change_time;
+	uint64	access_time;
+	uint64	internal_flags;
+	int32	nchildren_or_nlink;
+	uint32	default_protection_class;
+	uint32	write_generation_counter;
+	uint32	bsd_flags;
+	uint32	owner;
+	uint32	group;
+	uint16	mode;
+	uint16	pad1;
+	uint64	uncompressed_size;
+	uint8	xfields[];
+} _PACKED;
+
+// "j_drec_hashed_key_t" (directory entries in hashed trees; every volume
+// format since macOS 10.13 uses it)
+#define APFS_J_DREC_LEN_MASK			0x000003ff
+#define APFS_J_DREC_HASH_MASK			0xfffffc00
+	// The reference prints 0xfffff400, which drops bit 10; a 22-bit hash
+	// shifted left by 10 needs 0xfffffc00 (J_DREC_HASH_SHIFT is 10).
+#define APFS_J_DREC_HASH_SHIFT			10
+
+struct apfs_j_drec_hashed_key {
+	apfs_j_key	hdr;
+	uint32	name_len_and_hash;
+	uint8	name[];
+
+	uint16	NameLength() const
+		{ return B_LENDIAN_TO_HOST_INT32(name_len_and_hash)
+			& APFS_J_DREC_LEN_MASK; }
+} _PACKED;
+
+// "j_drec_val_t" and "Directory Entry File Types"
+#define APFS_DREC_TYPE_MASK				0x000f
+#define APFS_DT_UNKNOWN					0
+#define APFS_DT_FIFO					1
+#define APFS_DT_CHR						2
+#define APFS_DT_DIR						4
+#define APFS_DT_BLK						6
+#define APFS_DT_REG						8
+#define APFS_DT_LNK						10
+#define APFS_DT_SOCK					12
+
+struct apfs_j_drec_val {
+	uint64	file_id;
+	uint64	date_added;
+	uint16	flags;
+	uint8	xfields[];
+
+	uint64	FileID() const { return B_LENDIAN_TO_HOST_INT64(file_id); }
+	uint16	FileType() const
+		{ return B_LENDIAN_TO_HOST_INT16(flags) & APFS_DREC_TYPE_MASK; }
+} _PACKED;
+
+// "j_xattr_key_t", "j_xattr_val_t", "j_xattr_flags"
+#define APFS_XATTR_DATA_STREAM			0x0001
+#define APFS_XATTR_DATA_EMBEDDED		0x0002
+#define APFS_SYMLINK_EA_NAME			"com.apple.fs.symlink"
+
+struct apfs_j_xattr_key {
+	apfs_j_key	hdr;
+	uint16	name_len;
+	uint8	name[];
+
+	uint16	NameLength() const { return B_LENDIAN_TO_HOST_INT16(name_len); }
+} _PACKED;
+
+struct apfs_j_xattr_val {
+	uint16	flags;
+	uint16	xdata_len;
+	uint8	xdata[];
+
+	uint16	Flags() const { return B_LENDIAN_TO_HOST_INT16(flags); }
+	uint16	DataLength() const { return B_LENDIAN_TO_HOST_INT16(xdata_len); }
+} _PACKED;
+
+// "j_file_extent_key_t", "j_file_extent_val_t"
+#define APFS_J_FILE_EXTENT_LEN_MASK		0x00ffffffffffffffULL
+
+struct apfs_j_file_extent_key {
+	apfs_j_key	hdr;
+	uint64	logical_addr;
+
+	uint64	LogicalAddress() const
+		{ return B_LENDIAN_TO_HOST_INT64(logical_addr); }
+} _PACKED;
+
+struct apfs_j_file_extent_val {
+	uint64	len_and_flags;
+	uint64	phys_block_num;
+	uint64	crypto_id;
+
+	uint64	Length() const
+		{ return B_LENDIAN_TO_HOST_INT64(len_and_flags)
+			& APFS_J_FILE_EXTENT_LEN_MASK; }
+	uint64	PhysicalBlock() const
+		{ return B_LENDIAN_TO_HOST_INT64(phys_block_num); }
+} _PACKED;
+
+// "j_dstream_t"
+struct apfs_j_dstream {
+	uint64	size;
+	uint64	alloced_size;
+	uint64	default_crypto_id;
+	uint64	total_bytes_written;
+	uint64	total_bytes_read;
+} _PACKED;
+
+// "xf_blob_t", "x_field_t", "Extended-Field Types"
+#define APFS_INO_EXT_TYPE_SNAP_XID		1
+#define APFS_INO_EXT_TYPE_DELTA_TREE_OID	2
+#define APFS_INO_EXT_TYPE_DOCUMENT_ID	3
+#define APFS_INO_EXT_TYPE_NAME			4
+#define APFS_INO_EXT_TYPE_PREV_FSIZE	5
+#define APFS_INO_EXT_TYPE_FINDER_INFO	7
+#define APFS_INO_EXT_TYPE_DSTREAM		8
+#define APFS_INO_EXT_TYPE_DIR_STATS_KEY	10
+#define APFS_INO_EXT_TYPE_FS_UUID		11
+#define APFS_INO_EXT_TYPE_SPARSE_BYTES	13
+#define APFS_INO_EXT_TYPE_RDEV			14
+
+struct apfs_xf_blob {
+	uint16	xf_num_exts;
+	uint16	xf_used_data;
+	uint8	xf_data[];
+} _PACKED;
+
+struct apfs_x_field {
+	uint8	x_type;
+	uint8	x_flags;
+	uint16	x_size;
+} _PACKED;
+
+
 // Offsets the reference and real images agree on; checked at compile time.
 static_assert(sizeof(apfs_obj_phys) == 32, "obj_phys_t size");
 static_assert(sizeof(apfs_checkpoint_mapping) == 40,
@@ -525,6 +723,13 @@ static_assert(offsetof(apfs_superblock, omap_oid) == 0x80,
 	"apfs_omap_oid offset");
 static_assert(offsetof(apfs_superblock, volname) == 0x2c0,
 	"apfs_volname offset");
+static_assert(sizeof(apfs_j_inode_val) == 92, "j_inode_val_t size");
+static_assert(sizeof(apfs_j_drec_val) == 18, "j_drec_val_t size");
+static_assert(sizeof(apfs_j_file_extent_key) == 16,
+	"j_file_extent_key_t size");
+static_assert(sizeof(apfs_j_file_extent_val) == 24,
+	"j_file_extent_val_t size");
+static_assert(sizeof(apfs_j_dstream) == 40, "j_dstream_t size");
 
 
 #endif	// APFS_H

@@ -297,9 +297,40 @@ BTree::_ReadNode(apfs_oid_t oid, uint32 storage, BTreeNode& node)
 }
 
 
+uint32
+BTree::_ChildStorage() const
+{
+	uint32 flags = fInfo.fixed.Flags();
+	if ((flags & APFS_BTREE_PHYSICAL) != 0)
+		return APFS_OBJ_PHYSICAL;
+	if ((flags & APFS_BTREE_EPHEMERAL) != 0)
+		return APFS_OBJ_EPHEMERAL;
+	return APFS_OBJ_VIRTUAL;
+}
+
+
 status_t
 BTree::FindLessOrEqual(const void* target, apfs_key_compare compare,
 	void* context, void* key, uint16* _keyLength, void* value,
+	uint16* _valueLength)
+{
+	return _Find(target, compare, context, false, key, _keyLength, value,
+		_valueLength);
+}
+
+
+status_t
+BTree::FindExact(const void* target, apfs_key_compare compare, void* context,
+	void* value, uint16* _valueLength)
+{
+	return _Find(target, compare, context, true, NULL, NULL, value,
+		_valueLength);
+}
+
+
+status_t
+BTree::_Find(const void* target, apfs_key_compare compare, void* context,
+	bool exact, void* key, uint16* _keyLength, void* value,
 	uint16* _valueLength)
 {
 	if (fRoot == APFS_OID_INVALID)
@@ -311,10 +342,7 @@ BTree::FindLessOrEqual(const void* target, apfs_key_compare compare,
 		return status;
 
 	// Children of the root use the tree's own link type.
-	uint32 flags = fInfo.fixed.Flags();
-	uint32 childStorage = (flags & APFS_BTREE_PHYSICAL) != 0
-		? APFS_OBJ_PHYSICAL : (flags & APFS_BTREE_EPHEMERAL) != 0
-			? APFS_OBJ_EPHEMERAL : APFS_OBJ_VIRTUAL;
+	uint32 childStorage = _ChildStorage();
 
 	apfs_oid_t oid = fRoot;
 	uint32 storage = fRootStorage;
@@ -364,6 +392,8 @@ BTree::FindLessOrEqual(const void* target, apfs_key_compare compare,
 			status = node.KeyAt(found, &entryKey, &keyLength);
 			if (status != B_OK)
 				return status;
+			if (exact && compare(entryKey, keyLength, target, context) != 0)
+				return B_ENTRY_NOT_FOUND;
 			if (key != NULL) {
 				if (keyLength > *_keyLength)
 					return B_BUFFER_OVERFLOW;
@@ -394,4 +424,236 @@ BTree::FindLessOrEqual(const void* target, apfs_key_compare compare,
 
 	ERROR("B-tree %" B_PRIu64 " is too deep\n", fRoot);
 	return B_BAD_DATA;
+}
+
+
+// #pragma mark - BTreeIterator
+
+
+BTreeIterator::BTreeIterator(BTree* tree)
+	:
+	fTree(tree),
+	fLeafDepth(-1),
+	fAtEnd(true)
+{
+	fInitStatus = fLeaf.Init(tree->fContainer->BlockSize());
+	if (fInitStatus == B_OK)
+		fInitStatus = fInner.Init(tree->fContainer->BlockSize());
+}
+
+
+BTreeIterator::~BTreeIterator()
+{
+}
+
+
+status_t
+BTreeIterator::_ReadLevel(int32 depth, apfs_oid_t oid, BTreeNode& node)
+{
+	uint32 storage = depth == 0 ? fTree->fRootStorage : fTree->_ChildStorage();
+	status_t status = fTree->_ReadNode(oid, storage, node);
+	if (status != B_OK)
+		return status;
+	status = node.Validate(&fTree->fInfo.fixed);
+	if (status != B_OK) {
+		ERROR("damaged B-tree node %" B_PRIu64 "\n", oid);
+		return status;
+	}
+	return B_OK;
+}
+
+
+status_t
+BTreeIterator::Seek(const void* target, apfs_key_compare compare,
+	void* context)
+{
+	if (fInitStatus != B_OK)
+		return fInitStatus;
+	if (fTree->fRoot == APFS_OID_INVALID)
+		return B_NO_INIT;
+
+	fAtEnd = true;
+	apfs_oid_t oid = fTree->fRoot;
+	int32 parentLevel = -1;
+
+	for (int32 depth = 0; depth < (int32)kMaxDepth; depth++) {
+		BTreeNode& node = fInner;
+		status_t status = _ReadLevel(depth, oid, node);
+		if (status != B_OK)
+			return status;
+		if (parentLevel >= 0 && node.Level() != parentLevel - 1)
+			return B_BAD_DATA;
+
+		uint32 count = node.CountKeys();
+		if (node.IsLeaf()) {
+			// First key >= target.
+			int32 low = 0;
+			int32 high = (int32)count - 1;
+			uint32 found = count;
+			while (low <= high) {
+				int32 middle = (low + high) / 2;
+				const uint8* key;
+				uint16 keyLength;
+				status = node.KeyAt(middle, &key, &keyLength);
+				if (status != B_OK)
+					return status;
+				if (compare(key, keyLength, target, context) >= 0) {
+					found = middle;
+					high = middle - 1;
+				} else
+					low = middle + 1;
+			}
+
+			memcpy(fLeaf.Buffer(), node.Buffer(),
+				fTree->fContainer->BlockSize());
+			status = fLeaf.Validate(&fTree->fInfo.fixed);
+			if (status != B_OK)
+				return status;
+			fPath[depth].oid = oid;
+			fPath[depth].index = found;
+			fPath[depth].count = count;
+			fLeafDepth = depth;
+			fAtEnd = false;
+			return B_OK;
+		}
+
+		// Last key <= target, or the first child if all keys are larger.
+		int32 low = 0;
+		int32 high = (int32)count - 1;
+		int32 found = 0;
+		while (low <= high) {
+			int32 middle = (low + high) / 2;
+			const uint8* key;
+			uint16 keyLength;
+			status = node.KeyAt(middle, &key, &keyLength);
+			if (status != B_OK)
+				return status;
+			if (compare(key, keyLength, target, context) <= 0) {
+				found = middle;
+				low = middle + 1;
+			} else
+				high = middle - 1;
+		}
+
+		if (count == 0)
+			return B_BAD_DATA;
+		fPath[depth].oid = oid;
+		fPath[depth].index = found;
+		fPath[depth].count = count;
+		parentLevel = node.Level();
+		status = node.ChildAt(found, &oid);
+		if (status != B_OK)
+			return status;
+	}
+
+	return B_BAD_DATA;
+}
+
+
+status_t
+BTreeIterator::_DescendLeftmost(int32 depth, apfs_oid_t child,
+	int32 expectedLevel)
+{
+	// Read from depth (whose node is child) down to a leaf, always taking
+	// the first entry. Each level must be one below its parent.
+	apfs_oid_t oid = child;
+	for (; depth < (int32)kMaxDepth; depth++, expectedLevel--) {
+		status_t status = _ReadLevel(depth, oid, fInner);
+		if (status != B_OK)
+			return status;
+		if (fInner.Level() != expectedLevel) {
+			ERROR("B-tree node %" B_PRIu64 " has level %u, expected %"
+				B_PRId32 "\n", oid, fInner.Level(), expectedLevel);
+			return B_BAD_DATA;
+		}
+
+		fPath[depth].oid = oid;
+		fPath[depth].index = 0;
+		fPath[depth].count = fInner.CountKeys();
+
+		if (fInner.IsLeaf()) {
+			memcpy(fLeaf.Buffer(), fInner.Buffer(),
+				fTree->fContainer->BlockSize());
+			status = fLeaf.Validate(&fTree->fInfo.fixed);
+			if (status != B_OK)
+				return status;
+			fLeafDepth = depth;
+			return B_OK;
+		}
+
+		if (fInner.CountKeys() == 0)
+			return B_BAD_DATA;
+		status = fInner.ChildAt(0, &oid);
+		if (status != B_OK)
+			return status;
+	}
+	return B_BAD_DATA;
+}
+
+
+status_t
+BTreeIterator::_NextLeaf()
+{
+	// Climb until a level has an entry to the right, then go down its
+	// leftmost path. Empty leaves are skipped.
+	for (uint32 guard = 0; guard < 1000000; guard++) {
+		int32 depth = fLeafDepth - 1;
+		while (depth >= 0 && fPath[depth].index + 1 >= fPath[depth].count)
+			depth--;
+
+		if (depth < 0) {
+			fAtEnd = true;
+			return B_ENTRY_NOT_FOUND;
+		}
+
+		status_t status = _ReadLevel(depth, fPath[depth].oid, fInner);
+		if (status != B_OK)
+			return status;
+		fPath[depth].index++;
+		apfs_oid_t child;
+		status = fInner.ChildAt(fPath[depth].index, &child);
+		if (status != B_OK)
+			return status;
+
+		status = _DescendLeftmost(depth + 1, child, fInner.Level() - 1);
+		if (status != B_OK)
+			return status;
+		if (fPath[fLeafDepth].count > 0)
+			return B_OK;
+	}
+	return B_BAD_DATA;
+}
+
+
+status_t
+BTreeIterator::GetNext(const uint8** _key, uint16* _keyLength,
+	const uint8** _value, uint16* _valueLength)
+{
+	if (fInitStatus != B_OK)
+		return fInitStatus;
+	if (fAtEnd)
+		return B_ENTRY_NOT_FOUND;
+
+	Level& leaf = fPath[fLeafDepth];
+	if (leaf.index >= leaf.count) {
+		status_t status = _NextLeaf();
+		if (status != B_OK)
+			return status;
+	}
+
+	Level& current = fPath[fLeafDepth];
+	status_t status = fLeaf.KeyAt(current.index, _key, _keyLength);
+	if (status != B_OK)
+		return status;
+
+	status = fLeaf.ValueAt(current.index, _value, _valueLength);
+	if (status == B_ENTRY_NOT_FOUND) {
+		// A ghost: key without value.
+		*_value = NULL;
+		*_valueLength = 0;
+	} else if (status != B_OK)
+		return status;
+
+	current.index++;
+	return B_OK;
 }

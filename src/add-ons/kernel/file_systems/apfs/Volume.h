@@ -40,6 +40,8 @@ public:
 			const apfs_superblock& SuperBlock() const
 									{ return *fSuperBlock; }
 			bool				IsCaseSensitive() const;
+			BTree*				FileSystemTree() const
+									{ return fFileSystemTree; }
 
 private:
 			status_t			_ChooseVolume(const char* args,

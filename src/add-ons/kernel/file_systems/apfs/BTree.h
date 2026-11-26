@@ -63,6 +63,7 @@ private:
 // Read-only access to one B-tree. Child links are resolved according to
 // the tree flags: physical, ephemeral (checkpoint), or virtual (object map).
 class BTree {
+	friend class BTreeIterator;
 public:
 								BTree(Container* container,
 									ObjectMap* objectMap, apfs_xid_t xid);
@@ -84,10 +85,19 @@ public:
 									apfs_key_compare compare, void* context,
 									void* key, uint16* _keyLength,
 									void* value, uint16* _valueLength);
+			// Finds the entry whose key compares equal to target.
+			status_t			FindExact(const void* target,
+									apfs_key_compare compare, void* context,
+									void* value, uint16* _valueLength);
 
 private:
 			status_t			_ReadNode(apfs_oid_t oid, uint32 storage,
 									BTreeNode& node);
+			uint32				_ChildStorage() const;
+			status_t			_Find(const void* target,
+									apfs_key_compare compare, void* context,
+									bool exact, void* key, uint16* _keyLength,
+									void* value, uint16* _valueLength);
 
 			Container*			fContainer;
 			ObjectMap*			fObjectMap;
@@ -96,6 +106,51 @@ private:
 			uint32				fRootStorage;
 			uint32				fSubtype;
 			apfs_btree_info		fInfo;
+};
+
+
+// Walks the entries of a B-tree in key order, from a starting point. Nodes
+// have no sibling links, so the iterator keeps the path from the root and
+// climbs back up when a leaf is used up.
+class BTreeIterator {
+public:
+								BTreeIterator(BTree* tree);
+								~BTreeIterator();
+
+			status_t			InitCheck() const { return fInitStatus; }
+
+			// Positions before the first entry whose key is >= target.
+			status_t			Seek(const void* target,
+									apfs_key_compare compare, void* context);
+
+			// Returns the next entry and moves past it. The pointers stay
+			// valid until the next call. B_ENTRY_NOT_FOUND at the end.
+			status_t			GetNext(const uint8** _key,
+									uint16* _keyLength, const uint8** _value,
+									uint16* _valueLength);
+
+private:
+	static	const uint32		kMaxDepth = 16;
+
+			struct Level {
+				apfs_oid_t		oid;
+				uint32			index;
+				uint32			count;
+			};
+
+			status_t			_ReadLevel(int32 depth, apfs_oid_t oid,
+									BTreeNode& node);
+			status_t			_DescendLeftmost(int32 depth,
+									apfs_oid_t child, int32 expectedLevel);
+			status_t			_NextLeaf();
+
+			BTree*				fTree;
+			BTreeNode			fLeaf;
+			BTreeNode			fInner;
+			Level				fPath[kMaxDepth];
+			int32				fLeafDepth;
+			bool				fAtEnd;
+			status_t			fInitStatus;
 };
 
 

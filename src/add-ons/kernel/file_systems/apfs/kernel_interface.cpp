@@ -6,8 +6,9 @@
  *
  * Milestone 1: recognizes APFS containers, mounts one volume after reading
  * the container checkpoint, object maps and the volume's file-system tree
- * root, and lists every volume in the syslog. The root directory is still
- * empty; files and directories come with milestone 2.
+ * root, and lists every volume in the syslog.
+ * Milestone 2: directories, stat, symlinks and reading uncompressed files
+ * (directly from their extents; the file cache comes with milestone 3).
  */
 
 
@@ -15,6 +16,7 @@
 
 #include <file_systems/fs_ops_support.h>
 
+#include "Inode.h"
 #include "Volume.h"
 
 
@@ -28,13 +30,9 @@ struct identify_cookie {
 };
 
 
-// Placeholder node until the file-system tree is read (milestone 2).
-struct apfs_node {
-	ino_t		id;
-};
-
 struct dir_cookie {
-	uint32		position;
+	uint32				position;	// 0: ".", 1: "..", 2: entries
+	DirectoryIterator*	iterator;
 };
 
 
@@ -127,16 +125,24 @@ apfs_mount(fs_volume* _volume, const char* device, uint32 flags,
 		return status;
 	}
 
-	apfs_node* root = new(std::nothrow) apfs_node;
-	if (root == NULL) {
+	Inode* root = new(std::nothrow) Inode(volume, volume->RootID());
+	if (root == NULL)
+		status = B_NO_MEMORY;
+	else
+		status = root->Init();
+	if (status == B_OK && !root->IsDirectory())
+		status = B_BAD_DATA;
+	if (status != B_OK) {
+		ERROR("volume \"%s\": cannot read the root directory: %s\n",
+			volume->Name(), strerror(status));
+		delete root;
 		delete volume;
 		_volume->private_volume = NULL;
-		return B_NO_MEMORY;
+		return status;
 	}
-	root->id = volume->RootID();
 
-	status = publish_vnode(_volume, root->id, root, &gAPFSVnodeOps,
-		S_IFDIR | 0755, 0);
+	status = publish_vnode(_volume, root->ID(), root, &gAPFSVnodeOps,
+		root->Mode() & S_IFMT, 0);
 	if (status != B_OK) {
 		delete root;
 		delete volume;
@@ -144,7 +150,7 @@ apfs_mount(fs_volume* _volume, const char* device, uint32 flags,
 		return status;
 	}
 
-	*_rootID = root->id;
+	*_rootID = root->ID();
 	return B_OK;
 }
 
@@ -195,17 +201,20 @@ apfs_get_vnode(fs_volume* _volume, ino_t id, fs_vnode* _node, int* _type,
 	uint32* _flags, bool reenter)
 {
 	Volume* volume = (Volume*)_volume->private_volume;
-	if (id != volume->RootID())
-		return B_ENTRY_NOT_FOUND;
 
-	apfs_node* node = new(std::nothrow) apfs_node;
-	if (node == NULL)
+	Inode* inode = new(std::nothrow) Inode(volume, id);
+	if (inode == NULL)
 		return B_NO_MEMORY;
-	node->id = id;
 
-	_node->private_node = node;
+	status_t status = inode->Init();
+	if (status != B_OK) {
+		delete inode;
+		return status;
+	}
+
+	_node->private_node = inode;
 	_node->ops = &gAPFSVnodeOps;
-	*_type = S_IFDIR;
+	*_type = inode->Mode() & S_IFMT;
 	*_flags = 0;
 	return B_OK;
 }
@@ -214,7 +223,7 @@ apfs_get_vnode(fs_volume* _volume, ino_t id, fs_vnode* _node, int* _type,
 static status_t
 apfs_put_vnode(fs_volume* _volume, fs_vnode* _node, bool reenter)
 {
-	delete (apfs_node*)_node->private_node;
+	delete (Inode*)_node->private_node;
 	return B_OK;
 }
 
@@ -224,24 +233,42 @@ apfs_lookup(fs_volume* _volume, fs_vnode* _directory, const char* name,
 	ino_t* _vnodeID)
 {
 	Volume* volume = (Volume*)_volume->private_volume;
-	apfs_node* directory = (apfs_node*)_directory->private_node;
+	Inode* directory = (Inode*)_directory->private_node;
 
-	if (strcmp(name, ".") != 0 && strcmp(name, "..") != 0)
-		return B_ENTRY_NOT_FOUND;
+	if (!directory->IsDirectory())
+		return B_NOT_A_DIRECTORY;
 
-	// The root is its own parent.
-	*_vnodeID = directory->id;
+	status_t status = directory->CheckPermissions(X_OK);
+	if (status != B_OK)
+		return status;
+
+	ino_t id;
+	if (strcmp(name, ".") == 0)
+		id = directory->ID();
+	else if (strcmp(name, "..") == 0) {
+		// The root's parent (ROOT_DIR_PARENT) is not a real inode.
+		id = directory->ID() == volume->RootID()
+			? volume->RootID() : directory->ParentID();
+	} else {
+		DirectoryIterator iterator(directory);
+		status = iterator.InitCheck();
+		if (status == B_OK)
+			status = iterator.Lookup(name, &id);
+		if (status != B_OK)
+			return status;
+	}
+
+	*_vnodeID = id;
 	void* node;
-	return get_vnode(volume->FSVolume(), *_vnodeID, &node);
+	return get_vnode(volume->FSVolume(), id, &node);
 }
 
 
 static status_t
 apfs_access(fs_volume* _volume, fs_vnode* _node, int accessMode)
 {
-	if ((accessMode & W_OK) != 0)
-		return B_READ_ONLY_DEVICE;
-	return B_OK;
+	Inode* inode = (Inode*)_node->private_node;
+	return inode->CheckPermissions(accessMode);
 }
 
 
@@ -249,22 +276,23 @@ static status_t
 apfs_read_stat(fs_volume* _volume, fs_vnode* _node, struct stat* stat)
 {
 	Volume* volume = (Volume*)_volume->private_volume;
-	apfs_node* node = (apfs_node*)_node->private_node;
+	Inode* inode = (Inode*)_node->private_node;
 
 	memset(stat, 0, sizeof(*stat));
 	stat->st_dev = volume->ID();
-	stat->st_ino = node->id;
-	stat->st_nlink = 2;
+	stat->st_ino = inode->ID();
+	stat->st_nlink = inode->LinkCount();
 	stat->st_blksize = APFS_IO_SIZE;
-	stat->st_mode = S_IFDIR | 0755;
+	stat->st_uid = inode->UserID();
+	stat->st_gid = inode->GroupID();
+	stat->st_mode = inode->Mode();
+	stat->st_size = inode->Size();
+	stat->st_blocks = inode->AllocatedSize() / 512;
 
-	// APFS times are nanoseconds since 1970 ("Dates" in the reference).
-	uint64 time = volume->SuperBlock().LastModificationTime();
-	stat->st_mtim.tv_sec = time / 1000000000;
-	stat->st_mtim.tv_nsec = time % 1000000000;
-	stat->st_atim = stat->st_mtim;
-	stat->st_ctim = stat->st_mtim;
-	stat->st_crtim = stat->st_mtim;
+	inode->GetAccessTime(stat->st_atim);
+	inode->GetModificationTime(stat->st_mtim);
+	inode->GetChangeTime(stat->st_ctim);
+	inode->GetCreationTime(stat->st_crtim);
 	return B_OK;
 }
 
@@ -282,6 +310,11 @@ apfs_open(fs_volume* _volume, fs_vnode* _node, int openMode, void** _cookie)
 	// Tracker and BDirectory open directories this way too.
 	if ((openMode & O_RWMASK) != O_RDONLY || (openMode & O_TRUNC) != 0)
 		return B_READ_ONLY_DEVICE;
+
+	Inode* inode = (Inode*)_node->private_node;
+	status_t status = inode->CheckPermissions(open_mode_to_access(openMode));
+	if (status != B_OK)
+		return status;
 
 	*_cookie = NULL;
 	return B_OK;
@@ -306,9 +339,12 @@ static status_t
 apfs_read(fs_volume* _volume, fs_vnode* _node, void* _cookie, off_t pos,
 	void* buffer, size_t* _length)
 {
-	// Only directories exist until milestone 2.
-	*_length = 0;
-	return B_IS_A_DIRECTORY;
+	Inode* inode = (Inode*)_node->private_node;
+	if (inode->IsSymlink()) {
+		*_length = 0;
+		return B_BAD_VALUE;
+	}
+	return inode->ReadAt(pos, buffer, _length);
 }
 
 
@@ -348,7 +384,8 @@ static status_t
 apfs_read_symlink(fs_volume* _volume, fs_vnode* _node, char* buffer,
 	size_t* _bufferSize)
 {
-	return B_BAD_VALUE;
+	Inode* inode = (Inode*)_node->private_node;
+	return inode->ReadLink(buffer, _bufferSize);
 }
 
 
@@ -531,10 +568,30 @@ apfs_remove_attr(fs_volume* _volume, fs_vnode* _node, const char* name)
 static status_t
 apfs_open_dir(fs_volume* _volume, fs_vnode* _node, void** _cookie)
 {
+	Inode* inode = (Inode*)_node->private_node;
+	if (!inode->IsDirectory())
+		return B_NOT_A_DIRECTORY;
+
+	status_t status = inode->CheckPermissions(R_OK);
+	if (status != B_OK)
+		return status;
+
 	dir_cookie* cookie = new(std::nothrow) dir_cookie;
 	if (cookie == NULL)
 		return B_NO_MEMORY;
+
 	cookie->position = 0;
+	cookie->iterator = new(std::nothrow) DirectoryIterator(inode);
+	if (cookie->iterator == NULL)
+		status = B_NO_MEMORY;
+	else
+		status = cookie->iterator->InitCheck();
+	if (status != B_OK) {
+		delete cookie->iterator;
+		delete cookie;
+		return status;
+	}
+
 	*_cookie = cookie;
 	return B_OK;
 }
@@ -550,7 +607,9 @@ apfs_close_dir(fs_volume* _volume, fs_vnode* _node, void* _cookie)
 static status_t
 apfs_free_dir_cookie(fs_volume* _volume, fs_vnode* _node, void* _cookie)
 {
-	delete (dir_cookie*)_cookie;
+	dir_cookie* cookie = (dir_cookie*)_cookie;
+	delete cookie->iterator;
+	delete cookie;
 	return B_OK;
 }
 
@@ -560,31 +619,58 @@ apfs_read_dir(fs_volume* _volume, fs_vnode* _node, void* _cookie,
 	struct dirent* buffer, size_t bufferSize, uint32* _num)
 {
 	Volume* volume = (Volume*)_volume->private_volume;
-	apfs_node* node = (apfs_node*)_node->private_node;
+	Inode* inode = (Inode*)_node->private_node;
 	dir_cookie* cookie = (dir_cookie*)_cookie;
 
-	static const char* const kNames[] = { ".", ".." };
 	uint32 maxCount = *_num;
 	uint32 count = 0;
 
-	while (count < maxCount && cookie->position < sizeof(kNames) / sizeof(kNames[0])) {
-		const char* name = kNames[cookie->position];
-		size_t length = strlen(name);
-		if (bufferSize < offsetof(struct dirent, d_name) + length + 1) {
-			if (count == 0)
-				return B_BUFFER_OVERFLOW;
-			break;
+	while (count < maxCount && buffer != NULL) {
+		size_t nameSpace = bufferSize > offsetof(struct dirent, d_name)
+			? bufferSize - offsetof(struct dirent, d_name) : 0;
+		size_t length;
+		ino_t id;
+
+		if (cookie->position < 2) {
+			const char* name = cookie->position == 0 ? "." : "..";
+			length = strlen(name);
+			if (length + 1 > nameSpace) {
+				if (count == 0)
+					return B_BUFFER_OVERFLOW;
+				break;
+			}
+			strlcpy(buffer->d_name, name, length + 1);
+			if (cookie->position == 0)
+				id = inode->ID();
+			else {
+				id = inode->ID() == volume->RootID()
+					? volume->RootID() : inode->ParentID();
+			}
+			cookie->position++;
+		} else {
+			length = nameSpace;
+			status_t status = cookie->iterator->GetNext(buffer->d_name,
+				&length, &id);
+			if (status == B_ENTRY_NOT_FOUND)
+				break;
+			if (status == B_BUFFER_OVERFLOW) {
+				// GetNext() keeps the entry for the next call.
+				if (count == 0)
+					return B_BUFFER_OVERFLOW;
+				break;
+			}
+			if (status != B_OK) {
+				if (count == 0)
+					return status;
+				break;
+			}
 		}
 
 		buffer->d_dev = volume->ID();
-		buffer->d_ino = node->id;
-		strlcpy(buffer->d_name, name, length + 1);
-		cookie->position++;
+		buffer->d_ino = id;
 		count++;
 
 		buffer = next_dirent(buffer, length, bufferSize);
-		if (buffer == NULL)
-			break;
 	}
 
 	*_num = count;
@@ -595,8 +681,9 @@ apfs_read_dir(fs_volume* _volume, fs_vnode* _node, void* _cookie,
 static status_t
 apfs_rewind_dir(fs_volume* _volume, fs_vnode* _node, void* _cookie)
 {
-	((dir_cookie*)_cookie)->position = 0;
-	return B_OK;
+	dir_cookie* cookie = (dir_cookie*)_cookie;
+	cookie->position = 0;
+	return cookie->iterator->Rewind();
 }
 
 

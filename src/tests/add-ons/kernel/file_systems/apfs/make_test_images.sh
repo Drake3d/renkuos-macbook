@@ -12,6 +12,14 @@
 # multi.dmg   1.5 GB, volumes "Main", "Second", "CaseVol" (case-sensitive).
 #             Expect: volume list in this order; macOS adds .fseventsd files
 #             to every volume it mounts, so file counts include those.
+# stress.dmg  256 MB, volume "Stress", made from stress-src/: 3000 files in
+#             one directory (a B-tree of many nodes), a 20 MB random file, a
+#             sparse file, an empty file, NFC and NFD spellings of one name,
+#             Japanese, emoji and 251+4 character names, a 6-level path; in
+#             the image also a hard link (data-link.txt) and a compressed
+#             file (compressed.txt, ditto --hfsCompression).
+#             Check: copy /myfs out with apfs_shell's "cp -r" and diff it
+#             against stress-src/ (compressed.txt cannot be read yet).
 
 set -e
 
@@ -39,5 +47,30 @@ diskutil apfs addVolume "$disk" APFS Second
 diskutil apfs addVolume "$disk" "Case-sensitive APFS" CaseVol
 echo main > /Volumes/Main/main.txt
 echo two > /Volumes/Second/two.txt
+sync
+hdiutil detach "$disk"
+
+src=stress-src
+rm -rf "$src"
+mkdir -p "$src/many" "$src/a/b/c/d/e/f"
+for i in $(seq -w 0 2999); do echo "file $i" > "$src/many/f$i"; done
+head -c 20971520 /dev/urandom > "$src/big.bin"
+dd if=/dev/urandom of="$src/sparse.bin" bs=4096 count=1 seek=2560 2>/dev/null
+: > "$src/empty.txt"
+echo composed > "$src/$(printf 'caf\xc3\xa9-nfc.txt')"
+echo decomposed > "$src/$(printf 'cafe\xcc\x81-nfd.txt')"
+echo nihongo > "$src/$(printf '\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e.txt')"
+echo emoji > "$src/$(printf 'emoji-\xf0\x9f\x98\x80.txt')"
+echo long > "$src/$(printf 'L%.0s' $(seq 1 251)).txt"
+echo deep > "$src/a/b/c/d/e/f/deep.txt"
+echo shared > "$src/data.txt"
+
+hdiutil create -size 256m -fs APFS -volname Stress -layout NONE stress.dmg
+disk=$(attach stress.dmg)
+cp -R "$src/" /Volumes/Stress/
+ln /Volumes/Stress/data.txt /Volumes/Stress/data-link.txt
+seq 1 300000 > compress-me.txt
+ditto --hfsCompression compress-me.txt /Volumes/Stress/compressed.txt
+rm compress-me.txt
 sync
 hdiutil detach "$disk"

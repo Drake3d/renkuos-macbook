@@ -10,6 +10,7 @@ local apfsSources =
 	BTree.cpp
 	Checksum.cpp
 	Container.cpp
+	Inode.cpp
 	kernel_interface.cpp
 	ObjectMap.cpp
 	Volume.cpp
