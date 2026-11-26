@@ -7,7 +7,9 @@
 
 /*!	Picture settings of the FaceTime HD camera. They go straight to the
 	facetimehd driver, which applies them at once if the camera is on and
-	keeps them for every app that uses it, until the next restart.
+	keeps them for every app that uses it. They are also saved to the
+	driver's settings file, which the driver reads when it loads, so they
+	survive a restart.
 */
 
 
@@ -20,15 +22,20 @@
 #include <unistd.h>
 
 #include <Application.h>
+#include <File.h>
+#include <FindDirectory.h>
+#include <Path.h>
 #include <Box.h>
 #include <Button.h>
 #include <CheckBox.h>
 #include <ControlLook.h>
+#include <Directory.h>
 #include <Font.h>
 #include <LayoutBuilder.h>
 #include <MessageRunner.h>
 #include <Slider.h>
 #include <SpaceLayoutItem.h>
+#include <String.h>
 #include <StringView.h>
 
 
@@ -44,8 +51,13 @@ enum {
 	kMsgWhiteBalance		= 'wbal',
 	kMsgLowLight			= 'lowl',
 	kMsgDefaults			= 'dflt',
-	kMsgUpdateStatus		= 'stat'
+	kMsgUpdateStatus		= 'stat',
+	kMsgSave				= 'save'
 };
+
+// Wait this long after the last change before writing the settings file,
+// so dragging a slider writes it once.
+static const bigtime_t kSaveDelay = 500000;
 
 
 static int32
@@ -130,7 +142,9 @@ CameraWindow::CameraWindow()
 		B_NOT_ZOOMABLE | B_NOT_V_RESIZABLE | B_AUTO_UPDATE_SIZE_LIMITS
 			| B_ASYNCHRONOUS_CONTROLS | B_QUIT_ON_WINDOW_CLOSE),
 	fDevice(-1),
-	fStatusRunner(NULL)
+	fStatusRunner(NULL),
+	fSaveRunner(NULL),
+	fSavePending(false)
 {
 	// header
 	BStringView* title = new BStringView("title", "FaceTime HD camera");
@@ -217,6 +231,7 @@ CameraWindow::CameraWindow()
 CameraWindow::~CameraWindow()
 {
 	delete fStatusRunner;
+	delete fSaveRunner;
 	if (fDevice >= 0)
 		close(fDevice);
 }
@@ -225,6 +240,8 @@ CameraWindow::~CameraWindow()
 bool
 CameraWindow::QuitRequested()
 {
+	if (fSavePending)
+		_SaveSettings();
 	return true;
 }
 
@@ -245,6 +262,7 @@ CameraWindow::MessageReceived(BMessage* message)
 				}
 			}
 			_UpdateDefaultsButton();
+			_ScheduleSave();
 			break;
 		}
 
@@ -252,12 +270,14 @@ CameraWindow::MessageReceived(BMessage* message)
 			_SetControl(FTHD_CONTROL_AUTO_WHITE_BALANCE,
 				fWhiteBalance->Value() == B_CONTROL_ON);
 			_UpdateDefaultsButton();
+			_ScheduleSave();
 			break;
 
 		case kMsgLowLight:
 			_SetControl(FTHD_CONTROL_LOW_LIGHT,
 				fLowLight->Value() == B_CONTROL_ON);
 			_UpdateDefaultsButton();
+			_ScheduleSave();
 			break;
 
 		case kMsgDefaults:
@@ -270,10 +290,17 @@ CameraWindow::MessageReceived(BMessage* message)
 			fLowLight->SetValue(B_CONTROL_OFF);
 			_SetControl(FTHD_CONTROL_LOW_LIGHT, 0);
 			_UpdateDefaultsButton();
+			_ScheduleSave();
 			break;
 
 		case kMsgUpdateStatus:
 			_UpdateStatus();
+			break;
+
+		case kMsgSave:
+			delete fSaveRunner;
+			fSaveRunner = NULL;
+			_SaveSettings();
 			break;
 
 		default:
@@ -338,6 +365,75 @@ CameraWindow::_SetControl(uint32 id, int32 value)
 
 
 void
+CameraWindow::_ScheduleSave()
+{
+	if (fDevice < 0)
+		return;
+
+	fSavePending = true;
+	delete fSaveRunner;
+	BMessage save(kMsgSave);
+	fSaveRunner = new BMessageRunner(BMessenger(this), &save, kSaveDelay, 1);
+}
+
+
+/*!	Writes the current settings to the driver's settings file (see
+	facetimehd_ioctl.h), through a temporary file so a crash never leaves a
+	half-written one behind.
+*/
+status_t
+CameraWindow::_SaveSettings()
+{
+	fSavePending = false;
+
+	int32 values[FTHD_CONTROL_COUNT];
+	for (int32 i = 0; i < 4; i++)
+		values[fLevels[i]->Control()] = driver_for_level(fLevels[i]->Value());
+	values[FTHD_CONTROL_AUTO_WHITE_BALANCE]
+		= fWhiteBalance->Value() == B_CONTROL_ON ? 1 : 0;
+	values[FTHD_CONTROL_LOW_LIGHT] = fLowLight->Value() == B_CONTROL_ON ? 1 : 0;
+
+	BString text("# FaceTime HD camera picture settings, written by the "
+		"Camera preferences.\n# The facetimehd driver reads them when it "
+		"loads.\n");
+	for (uint32 id = 0; id < FTHD_CONTROL_COUNT; id++)
+		text << kFTHDControlNames[id] << " " << values[id] << "\n";
+
+	BPath path;
+	status_t status = find_directory(B_USER_SETTINGS_DIRECTORY, &path, true);
+	if (status == B_OK)
+		status = path.Append("kernel/drivers");
+	if (status == B_OK)
+		status = create_directory(path.Path(), 0755);
+	if (status != B_OK)
+		return status;
+
+	BPath temporary(path.Path(), FTHD_SETTINGS_NAME "~");
+	BPath final(path.Path(), FTHD_SETTINGS_NAME);
+	BFile file(temporary.Path(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
+	status = file.InitCheck();
+	if (status == B_OK) {
+		ssize_t written = file.Write(text.String(), text.Length());
+		if (written != text.Length())
+			status = written < 0 ? written : B_IO_ERROR;
+	}
+	if (status == B_OK)
+		status = file.Sync();
+	file.Unset();
+	if (status == B_OK && rename(temporary.Path(), final.Path()) != 0)
+		status = errno;
+
+	// Shown on the status line until the next save.
+	if (status == B_OK)
+		fSaveState = "Settings saved";
+	else
+		fSaveState.SetToFormat("Could not save the settings: %s", strerror(status));
+	_UpdateStatus();
+	return status;
+}
+
+
+void
 CameraWindow::_UpdateStatus()
 {
 	if (fDevice < 0) {
@@ -352,11 +448,12 @@ CameraWindow::_UpdateStatus()
 		return;
 	}
 
-	char text[256];
-	snprintf(text, sizeof(text), "%s  \xC2\xB7  %s",
-		info.streaming ? "On" : "Off",
+	BString text;
+	text.SetToFormat("%s  \xC2\xB7  %s", info.streaming ? "On" : "Off",
 		info.set_file_loaded ? "Colour calibrated"
 			: "Colour calibration file missing");
+	if (!fSaveState.IsEmpty())
+		text << "  \xC2\xB7  " << fSaveState;
 	fStatus->SetText(text);
 }
 

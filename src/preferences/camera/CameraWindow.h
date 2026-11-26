@@ -7,6 +7,7 @@
 #define CAMERA_WINDOW_H
 
 
+#include <String.h>
 #include <Window.h>
 
 #include "facetimehd_ioctl.h"
@@ -31,6 +32,8 @@ private:
 			status_t			_Control(uint32 op, uint32 id, int32* value);
 			void				_Load();
 			void				_SetControl(uint32 id, int32 value);
+			void				_ScheduleSave();
+			status_t			_SaveSettings();
 			void				_UpdateStatus();
 			void				_UpdateDefaultsButton();
 
@@ -41,6 +44,9 @@ private:
 			BButton*			fDefaultsButton;
 			BStringView*		fStatus;
 			BMessageRunner*		fStatusRunner;
+			BMessageRunner*		fSaveRunner;
+			bool				fSavePending;
+			BString				fSaveState;
 };
 
 

@@ -31,6 +31,7 @@
 #include <unistd.h>
 #include <string.h>
 
+#include <driver_settings.h>
 #include <util/AutoLock.h>
 
 
@@ -197,6 +198,53 @@ read32(const uint8* data, size_t offset)
 // #pragma mark - sensor
 
 
+/*!	Takes the picture settings the Camera preferences saved (see
+	facetimehd_ioctl.h); values out of range are ignored.
+*/
+static void
+load_saved_controls(fthd_device* device)
+{
+	void* settings = load_driver_settings(FTHD_SETTINGS_NAME);
+	if (settings == NULL) {
+		FTHD_LOG("no saved picture settings (%s), using the defaults\n",
+			"~/config/settings/kernel/drivers/" FTHD_SETTINGS_NAME);
+		return;
+	}
+
+	int32 loaded = 0;
+	for (uint32 id = 0; id < FTHD_CONTROL_COUNT; id++) {
+		const char* text = get_driver_parameter(settings,
+			kFTHDControlNames[id], NULL, NULL);
+		if (text == NULL)
+			continue;
+
+		char* end;
+		long value = strtol(text, &end, 10);
+		bool isSwitch = id == FTHD_CONTROL_AUTO_WHITE_BALANCE
+			|| id == FTHD_CONTROL_LOW_LIGHT;
+		if (end == text || *end != '\0' || value < 0
+			|| value > (isSwitch ? 1 : 255)) {
+			FTHD_LOG("saved setting %s=%s ignored\n", kFTHDControlNames[id],
+				text);
+			continue;
+		}
+		device->controls[id] = value;
+		loaded++;
+	}
+	unload_driver_settings(settings);
+
+	FTHD_LOG("picture settings: brightness %" B_PRId32 ", contrast %" B_PRId32
+		", saturation %" B_PRId32 ", hue %" B_PRId32 ", white balance %s, "
+		"low light %s (%" B_PRId32 " saved)\n",
+		device->controls[FTHD_CONTROL_BRIGHTNESS],
+		device->controls[FTHD_CONTROL_CONTRAST],
+		device->controls[FTHD_CONTROL_SATURATION],
+		device->controls[FTHD_CONTROL_HUE],
+		device->controls[FTHD_CONTROL_AUTO_WHITE_BALANCE] != 0 ? "auto" : "off",
+		device->controls[FTHD_CONTROL_LOW_LIGHT] != 0 ? "on" : "off", loaded);
+}
+
+
 void
 fthd_stream_init(fthd_device* device)
 {
@@ -215,6 +263,8 @@ fthd_stream_init(fthd_device* device)
 	device->controls[FTHD_CONTROL_HUE] = 128;
 	device->controls[FTHD_CONTROL_AUTO_WHITE_BALANCE] = 1;
 	device->controls[FTHD_CONTROL_LOW_LIGHT] = 0;
+
+	load_saved_controls(device);
 }
 
 

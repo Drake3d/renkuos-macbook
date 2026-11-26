@@ -44,6 +44,22 @@ enum {
 };
 
 
+// Saved picture settings. The Camera preferences write them to
+// ~/config/settings/kernel/drivers/facetimehd in driver settings format,
+// one "<name> <value>" line per control, with the driver's values
+// (0-255, or 0 and 1); the driver reads them when it loads, so they
+// survive a restart. Names in FTHD_CONTROL order.
+#define FTHD_SETTINGS_NAME		"facetimehd"
+static const char* const kFTHDControlNames[FTHD_CONTROL_COUNT] = {
+	"brightness",
+	"contrast",
+	"saturation",
+	"hue",
+	"auto_white_balance",
+	"low_light"
+};
+
+
 struct fthd_control {
 	uint32		id;
 	int32		value;
