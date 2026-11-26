@@ -38,6 +38,7 @@
 #include <net_buffer.h>
 #include <util/AutoLock.h>
 
+#include "brcmf_chip.h"
 #include "brcmf_transport.h"
 
 
@@ -141,14 +142,6 @@ private:
 // #pragma mark - chip and protocol (brcmf.cpp)
 
 
-struct brcmf_core {
-	uint16		id;
-	uint8		rev;
-	uint32		base;
-	uint32		wrap;
-};
-
-
 struct brcmf_scan_entry {
 	bool		seen;
 	uint8		bssid[6];
@@ -167,13 +160,12 @@ struct brcmf_scan_entry {
 
 
 #define BRCMF_MAX_SCAN_RESULTS	64
-#define BRCMF_MAX_CORES			32
 #define BRCMF_RX_QUEUE_MAX		256
 #define BRCMF_MAX_FRAME			2048
 #define BRCMF_BUFFER_SIZE		(64 * 1024)
 
 
-class Brcmf : public BrcmfReceiver {
+class Brcmf : public BrcmfReceiver, public BrcmfBackplane {
 public:
 								Brcmf(SdioHost* host,
 									BrcmfTransport* transport = NULL);
@@ -239,6 +231,11 @@ public:
 	virtual	void				ReceiveData(const uint8* data,
 									size_t length);
 
+	// BrcmfBackplane, for SDIO (bus lock held)
+	virtual	uint32				Read4(uint32 address);
+	virtual	void				Write4(uint32 address, uint32 value);
+	virtual	void				WriteResetVector(uint32 vector);
+
 private:
 			// backplane access
 			uint8				_Read1(uint32 address);
@@ -252,19 +249,6 @@ private:
 			// chip
 			status_t			_SdioInit();
 			status_t			_ChipAttach();
-			void				_EromScan();
-			bool				_EromGetRegAddress(uint32& erom,
-									uint32& base, uint32& wrap);
-			brcmf_core*			_Core(uint16 id, int index = 0);
-			brcmf_core*			_Pmu();
-			bool				_CoreIsUp(brcmf_core* core);
-			void				_CoreDisable(brcmf_core* core,
-									uint32 prereset, uint32 reset);
-			void				_CoreReset(brcmf_core* core,
-									uint32 prereset, uint32 reset,
-									uint32 postreset);
-			void				_SetPassive();
-			status_t			_SetActive(uint32 resetVector);
 			status_t			_WaitClock(bool alpOnly);
 			status_t			_LoadFirmware();
 			status_t			_ReadFile(const char* name, uint8** _data,
@@ -315,14 +299,7 @@ private:
 			mutex				fCommandLock;
 			uint32				fWindow;
 
-			uint16				fChip;
-			uint8				fChipRev;
-			brcmf_core			fCores[BRCMF_MAX_CORES];
-			int32				fCoreCount;
-			uint32				fRamBase;
-			uint32				fRamSize;
-			uint32				fCcCaps;
-			uint32				fCcCapsExt;
+			BrcmfChip			fChipInfo;
 			uint32				fSdioCoreBase;
 
 			uint8*				fBounce;		// bus transfers
@@ -366,6 +343,7 @@ private:
 			uint32				fScanVersion;
 			bool				fHasFirmwareSupplicant;
 			bool				fScanning;
+			bool				fScanForSsid;
 			brcmf_scan_entry*	fScanResults[BRCMF_MAX_SCAN_RESULTS];
 			int32				fScanCount;
 			sem_id				fLinkStateSem;

@@ -193,8 +193,6 @@ BrcmfPcie::BrcmfPcie(pci_device_module_info* pci, pci_device* device)
 	fH2DWriteBase(0),
 	fH2DReadBase(0),
 	fReceiver(NULL),
-	fFlowState(0),
-	fFlowStatus(0),
 	fRxFrames(0),
 	fTxFrames(0),
 	fTxFailed(0)
@@ -209,8 +207,13 @@ BrcmfPcie::BrcmfPcie(pci_device_module_info* pci, pci_device* device)
 		rings[i]->memory = empty;
 	}
 	fScratch = fRingUpdate = fIoctlRequest = empty;
-	memset(&fFlowRing, 0, sizeof(fFlowRing));
-	fFlowRing.memory = empty;
+	for (int i = 0; i < BRCMF_PCIE_FLOW_RINGS; i++) {
+		memset(&fFlowRings[i], 0, sizeof(brcmf_msgring));
+		fFlowRings[i].memory = empty;
+		fFlowState[i] = 0;
+		fFlowStatus[i] = 0;
+	}
+	memset(fTxRing, 0, sizeof(fTxRing));
 	brcmf_frame_pool* pools[] = { &fRxPool, &fTxPool };
 	for (size_t i = 0; i < B_COUNT_OF(pools); i++) {
 		memset(pools[i], 0, sizeof(brcmf_frame_pool));
@@ -227,7 +230,7 @@ BrcmfPcie::BrcmfPcie(pci_device_module_info* pci, pci_device* device)
 	fIoctlCondition.Init(this, "brcmfmac ioctl");
 	mutex_init(&fTxLock, "brcmfmac pcie tx");
 	fTxCondition.Init(&fTxPool, "brcmfmac tx");
-	fFlowCondition.Init(&fFlowRing, "brcmfmac flow ring");
+	fFlowCondition.Init(fFlowRings, "brcmfmac flow ring");
 }
 
 
@@ -448,7 +451,7 @@ BrcmfPcie::_AckInterrupts(uint32 status)
 /*!	Resets the chip through the chipcommon watchdog, with ASPM switched off
 	meanwhile, and restores what the reset loses.
 */
-void
+bool
 BrcmfPcie::ResetBus()
 {
 	_SelectCore(BRCMF_CORE_PCIE2);
@@ -469,7 +472,7 @@ BrcmfPcie::ResetBus()
 
 	const brcmf_chip_core* pcie = fChip.Core(BRCMF_CORE_PCIE2);
 	if (pcie == NULL)
-		return;
+		return true;
 	if (pcie->rev <= 13) {
 		for (size_t i = 0; i < B_COUNT_OF(kConfigRestore); i++) {
 			_PcieWrite(PCIE2_CONFIGADDR, kConfigRestore[i]);
@@ -482,6 +485,7 @@ BrcmfPcie::ResetBus()
 	uint32 status = _InterruptStatus();
 	if (status != 0xffffffff)
 		_AckInterrupts(status);
+	return true;
 }
 
 

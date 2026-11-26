@@ -32,6 +32,11 @@ public:
 
 	// Sends an Ethernet frame. The buffer is freed on success only.
 	virtual	status_t			TransportSend(net_buffer* buffer) = 0;
+
+	// The link to the network went down: anything kept per network (the
+	// PCIe flow rings) is dropped. May be called from event handling, so
+	// it must not wait for the firmware.
+	virtual	void				TransportLinkDown() {}
 };
 
 

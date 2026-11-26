@@ -70,6 +70,9 @@ struct brcmf_msgring {
 #define BRCMF_PCIE_CONTROL_BUFFERS \
 	(BRCMF_PCIE_IOCTL_BUFFERS + BRCMF_PCIE_EVENT_BUFFERS)
 
+// TX flow rings, one per FIFO (access category), as bwfm for a station
+#define BRCMF_PCIE_FLOW_RINGS		4
+
 // Frame buffers, in physically contiguous chunks
 #define BRCMF_PCIE_FRAME_SIZE		2048
 #define BRCMF_PCIE_FRAMES_PER_CHUNK	32
@@ -118,11 +121,12 @@ public:
 									void* data, size_t length,
 									size_t* _replyLength);
 	virtual	status_t			TransportSend(net_buffer* buffer);
+	virtual	void				TransportLinkDown();
 
 	// BrcmfBackplane
 	virtual	uint32				Read4(uint32 address);
 	virtual	void				Write4(uint32 address, uint32 value);
-	virtual	void				ResetBus();
+	virtual	bool				ResetBus();
 	virtual	void				WriteResetVector(uint32 vector);
 
 private:
@@ -191,7 +195,9 @@ private:
 			void				_HandleRxComplete(const uint8* message);
 			void				_HandleTxStatus(const uint8* message);
 			void				_HandleFlowRingCreated(const uint8* message);
-			status_t			_OpenFlowRing(const uint8* destination,
+			void				_HandleFlowRingDeleted(const uint8* message);
+			status_t			_OpenFlowRing(int32 fifo,
+									const uint8* destination,
 									const uint8* source);
 
 private:
@@ -268,9 +274,10 @@ private:
 			BrcmfReceiver*		fReceiver;
 			brcmf_frame_pool	fRxPool;
 			brcmf_frame_pool	fTxPool;
-			brcmf_msgring		fFlowRing;
-			int32				fFlowState;
-			uint16				fFlowStatus;
+			brcmf_msgring		fFlowRings[BRCMF_PCIE_FLOW_RINGS];
+			int32				fFlowState[BRCMF_PCIE_FLOW_RINGS];
+			uint16				fFlowStatus[BRCMF_PCIE_FLOW_RINGS];
+			uint8				fTxRing[BRCMF_PCIE_FRAMES];
 			ConditionVariable	fFlowCondition;
 			mutex				fTxLock;
 			ConditionVariable	fTxCondition;

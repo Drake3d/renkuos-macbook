@@ -456,6 +456,10 @@ BrcmfPcie::_HandleMessage(const uint8* message)
 			_HandleFlowRingCreated(message);
 			break;
 
+		case MSGBUF_TYPE_FLOW_RING_DELETE_CMPLT:
+			_HandleFlowRingDeleted(message);
+			break;
+
 		case MSGBUF_TYPE_D2H_MAILBOX_DATA:
 		{
 			const msgbuf_status* status = (const msgbuf_status*)message;

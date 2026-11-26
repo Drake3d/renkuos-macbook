@@ -21,9 +21,9 @@
  * Chip bring-up and firmware protocol for Broadcom/Cypress FullMAC SDIO WLAN
  * chips.
  *
- * Provenance: the chip/core handling, the SDPCM framing, the BCDC control
- * protocol, the firmware event handling and the NVRAM conversion follow
- * OpenBSD's bwfm(4), and the firmware download and power-up order also
+ * Provenance: the chip/core handling (now in brcmf_chip.cpp), the SDPCM
+ * framing, the BCDC control protocol, the firmware event handling and the
+ * NVRAM conversion follow OpenBSD's bwfm(4), and the firmware download and power-up order also
  * follow Plan 9's ether4330. Most of that is the chip's interface rather
  * than expression, but the structure of several functions (notably
  * _ConvertNvram()) follows bwfm closely, so this file carries bwfm's
@@ -104,76 +104,10 @@ enum {
 static const uint32 kSbWindowMask = 0x7fff;
 static const uint32 kSbAccess32 = 0x8000;
 
-// backplane
+// backplane (the chip side is in brcmf_chip.cpp)
 enum {
-	CHIP_BASE			= 0x18000000,
-	CHIP_REG_CHIPID		= 0x000,
-	CHIP_REG_CAPS		= 0x004,
-	CHIP_REG_CAPS_EXT	= 0x0ac,
-	CHIP_REG_EROMPTR	= 0x0fc,
+	CHIP_BASE			= BRCMF_CHIP_BASE,
 	CHIP_REG_PMUCONTROL	= 0x600,
-	CHIP_REG_PMUCAPS	= 0x604,
-
-	CAPS_PMU			= 0x10000000,
-	CAPS_EXT_AOB		= 0x00000040,
-
-	AGENT_IOCTL			= 0x408,
-		IOCTL_CLK			= 0x0001,
-		IOCTL_FGC			= 0x0002,
-		IOCTL_CR4_CPUHALT	= 0x0020,
-		IOCTL_D11_PHYCLOCKEN = 0x0004,
-		IOCTL_D11_PHYRESET	= 0x0008,
-	AGENT_RESET_CTL		= 0x800,
-		RESET_CTL_RESET		= 0x0001,
-
-	CORE_CHIPCOMMON		= 0x800,
-	CORE_INTERNAL_MEM	= 0x80e,
-	CORE_80211			= 0x812,
-	CORE_PMU			= 0x827,
-	CORE_SDIO_DEV		= 0x829,
-	CORE_ARM_CM3		= 0x82a,
-	CORE_ARM_CR4		= 0x83e,
-	CORE_GCI			= 0x840,
-	CORE_ARM_CA7		= 0x847,
-	CORE_SYS_MEM		= 0x849,
-
-	CR4_CAP				= 0x04,
-	CR4_BANKIDX			= 0x40,
-	CR4_BANKINFO		= 0x44,
-
-	SOCRAM_COREINFO		= 0x00,
-	SOCRAM_BANKIDX		= 0x10,
-	SOCRAM_BANKINFO		= 0x40,
-	SOCRAM_BANKPDA		= 0x44,
-};
-
-// EROM descriptors
-enum {
-	DMP_DESC_MASK			= 0x0000000f,
-	DMP_DESC_COMPONENT		= 0x00000001,
-	DMP_DESC_MASTER_PORT	= 0x00000003,
-	DMP_DESC_ADDRESS		= 0x00000005,
-	DMP_DESC_ADDRSIZE_GT32	= 0x00000008,
-	DMP_DESC_EOT			= 0x0000000f,
-	DMP_COMP_PARTNUM		= 0x000fff00,
-	DMP_COMP_PARTNUM_S		= 8,
-	DMP_COMP_REVISION		= 0xff000000,
-	DMP_COMP_REVISION_S		= 24,
-	DMP_COMP_NUM_SWRAP		= 0x00f80000,
-	DMP_COMP_NUM_SWRAP_S	= 19,
-	DMP_COMP_NUM_MWRAP		= 0x0007c000,
-	DMP_COMP_NUM_MWRAP_S	= 14,
-	DMP_SLAVE_ADDR_BASE		= 0xfffff000,
-	DMP_SLAVE_TYPE			= 0x000000c0,
-	DMP_SLAVE_TYPE_S		= 6,
-	DMP_SLAVE_TYPE_SLAVE	= 0,
-	DMP_SLAVE_TYPE_SWRAP	= 2,
-	DMP_SLAVE_TYPE_MWRAP	= 3,
-	DMP_SLAVE_SIZE_TYPE		= 0x00000030,
-	DMP_SLAVE_SIZE_TYPE_S	= 4,
-	DMP_SLAVE_SIZE_4K		= 0,
-	DMP_SLAVE_SIZE_8K		= 1,
-	DMP_SLAVE_SIZE_DESC		= 3,
 };
 
 // SDIO device core registers
@@ -345,13 +279,6 @@ Brcmf::Brcmf(SdioHost* host, BrcmfTransport* transport)
 	fHost(host),
 	fTransport(transport),
 	fWindow(0xffffffff),
-	fChip(0),
-	fChipRev(0),
-	fCoreCount(0),
-	fRamBase(0),
-	fRamSize(0),
-	fCcCaps(0),
-	fCcCapsExt(0),
 	fSdioCoreBase(0),
 	fBounce(NULL),
 	fTxBuffer(NULL),
@@ -380,6 +307,7 @@ Brcmf::Brcmf(SdioHost* host, BrcmfTransport* transport)
 	fScanVersion(0),
 	fHasFirmwareSupplicant(false),
 	fScanning(false),
+	fScanForSsid(false),
 	fScanCount(0),
 	fLinkStateSem(-1)
 {
@@ -659,258 +587,32 @@ Brcmf::_SdioInit()
 // #pragma mark - chip
 
 
-brcmf_core*
-Brcmf::_Core(uint16 id, int index)
+// BrcmfBackplane, for the bus independent chip code (brcmf_chip.cpp).
+// Backplane access needs the bus lock.
+
+uint32
+Brcmf::Read4(uint32 address)
 {
-	for (int32 i = 0; i < fCoreCount; i++) {
-		if (fCores[i].id == id && index-- == 0)
-			return &fCores[i];
-	}
-	return NULL;
-}
-
-
-brcmf_core*
-Brcmf::_Pmu()
-{
-	brcmf_core* cc = _Core(CORE_CHIPCOMMON);
-	if (cc != NULL && cc->rev >= 35 && (fCcCapsExt & CAPS_EXT_AOB) != 0) {
-		brcmf_core* pmu = _Core(CORE_PMU);
-		if (pmu != NULL)
-			return pmu;
-	}
-	return cc;
-}
-
-
-bool
-Brcmf::_CoreIsUp(brcmf_core* core)
-{
-	uint32 ioctl = _Read4(core->wrap + AGENT_IOCTL);
-	uint32 reset = _Read4(core->wrap + AGENT_RESET_CTL);
-	return (ioctl & (IOCTL_FGC | IOCTL_CLK)) == IOCTL_CLK
-		&& (reset & RESET_CTL_RESET) == 0;
+	return _Read4(address);
 }
 
 
 void
-Brcmf::_CoreDisable(brcmf_core* core, uint32 prereset, uint32 reset)
+Brcmf::Write4(uint32 address, uint32 value)
 {
-	uint32 value = _Read4(core->wrap + AGENT_RESET_CTL);
-	if ((value & RESET_CTL_RESET) == 0) {
-		_Write4(core->wrap + AGENT_IOCTL, prereset | IOCTL_FGC | IOCTL_CLK);
-		_Read4(core->wrap + AGENT_IOCTL);
-
-		_Write4(core->wrap + AGENT_RESET_CTL, RESET_CTL_RESET);
-		spin(20);
-
-		int i;
-		for (i = 300; i > 0; i--) {
-			if (_Read4(core->wrap + AGENT_RESET_CTL) == RESET_CTL_RESET)
-				break;
-		}
-		if (i == 0)
-			ERROR("timeout on core %#x reset\n", core->id);
-	}
-
-	_Write4(core->wrap + AGENT_IOCTL, reset | IOCTL_FGC | IOCTL_CLK);
-	_Read4(core->wrap + AGENT_IOCTL);
+	_Write4(address, value);
 }
 
 
 void
-Brcmf::_CoreReset(brcmf_core* core, uint32 prereset, uint32 reset,
-	uint32 postreset)
+Brcmf::WriteResetVector(uint32 vector)
 {
-	_CoreDisable(core, prereset, reset);
-
-	int i;
-	for (i = 50; i > 0; i--) {
-		if ((_Read4(core->wrap + AGENT_RESET_CTL) & RESET_CTL_RESET) == 0)
-			break;
-		_Write4(core->wrap + AGENT_RESET_CTL, 0);
-		spin(60);
+	_DevWrite(SD_INTSTATUS, 0xffffffff);
+	if (vector != 0) {
+		uint8 data[4];
+		put32(data, vector);
+		_RamReadWrite(0, data, 4, true);
 	}
-	if (i == 0)
-		ERROR("timeout on core %#x reset release\n", core->id);
-
-	_Write4(core->wrap + AGENT_IOCTL, postreset | IOCTL_CLK);
-	_Read4(core->wrap + AGENT_IOCTL);
-}
-
-
-bool
-Brcmf::_EromGetRegAddress(uint32& erom, uint32& base, uint32& wrap)
-{
-	base = 0;
-	wrap = 0;
-
-	uint32 value = _Read4(erom);
-	uint32 type = value & DMP_DESC_MASK;
-	uint32 wrapType;
-	if (type == DMP_DESC_MASTER_PORT) {
-		wrapType = DMP_SLAVE_TYPE_MWRAP;
-		erom += 4;
-	} else if ((type & ~DMP_DESC_ADDRSIZE_GT32) == DMP_DESC_ADDRESS)
-		wrapType = DMP_SLAVE_TYPE_SWRAP;
-	else
-		return false;
-
-	int guard = 0;
-	do {
-		do {
-			value = _Read4(erom);
-			type = value & DMP_DESC_MASK;
-			if (type == DMP_DESC_COMPONENT)
-				return true;
-			if (type == DMP_DESC_EOT)
-				return false;
-			erom += 4;
-			if (++guard > 512)
-				return false;
-		} while ((type & ~DMP_DESC_ADDRSIZE_GT32) != DMP_DESC_ADDRESS);
-
-		if ((type & DMP_DESC_ADDRSIZE_GT32) != 0)
-			erom += 4;
-
-		uint32 sizeType = (value & DMP_SLAVE_SIZE_TYPE)
-			>> DMP_SLAVE_SIZE_TYPE_S;
-		if (sizeType == DMP_SLAVE_SIZE_DESC) {
-			uint32 size = _Read4(erom);
-			if ((size & DMP_DESC_ADDRSIZE_GT32) != 0)
-				erom += 8;
-			else
-				erom += 4;
-		}
-		if (sizeType != DMP_SLAVE_SIZE_4K && sizeType != DMP_SLAVE_SIZE_8K)
-			continue;
-
-		uint32 slaveType = (value & DMP_SLAVE_TYPE) >> DMP_SLAVE_TYPE_S;
-		if (base == 0 && slaveType == DMP_SLAVE_TYPE_SLAVE)
-			base = value & DMP_SLAVE_ADDR_BASE;
-		if (wrap == 0 && slaveType == wrapType)
-			wrap = value & DMP_SLAVE_ADDR_BASE;
-	} while (base == 0 || wrap == 0);
-
-	return true;
-}
-
-
-void
-Brcmf::_EromScan()
-{
-	uint32 erom = _Read4(CHIP_BASE + CHIP_REG_EROMPTR);
-	uint32 type = 0;
-	int guard = 0;
-
-	while (type != DMP_DESC_EOT && fCoreCount < BRCMF_MAX_CORES
-		&& ++guard < 1024) {
-		uint32 value = _Read4(erom);
-		type = value & DMP_DESC_MASK;
-		erom += 4;
-
-		if (type != DMP_DESC_COMPONENT)
-			continue;
-
-		uint16 id = (value & DMP_COMP_PARTNUM) >> DMP_COMP_PARTNUM_S;
-
-		value = _Read4(erom);
-		type = value & DMP_DESC_MASK;
-		erom += 4;
-		if (type != DMP_DESC_COMPONENT) {
-			ERROR("EROM: not a component descriptor\n");
-			return;
-		}
-
-		uint32 masterWraps = (value & DMP_COMP_NUM_MWRAP)
-			>> DMP_COMP_NUM_MWRAP_S;
-		uint32 slaveWraps = (value & DMP_COMP_NUM_SWRAP)
-			>> DMP_COMP_NUM_SWRAP_S;
-		uint8 revision = (value & DMP_COMP_REVISION) >> DMP_COMP_REVISION_S;
-
-		if (masterWraps + slaveWraps == 0 && id != CORE_PMU && id != CORE_GCI)
-			continue;
-
-		uint32 base, wrap;
-		if (!_EromGetRegAddress(erom, base, wrap))
-			continue;
-
-		brcmf_core& core = fCores[fCoreCount++];
-		core.id = id;
-		core.rev = revision;
-		core.base = base;
-		core.wrap = wrap;
-	}
-}
-
-
-void
-Brcmf::_SetPassive()
-{
-	brcmf_core* core = _Core(CORE_ARM_CR4);
-	if (core == NULL)
-		core = _Core(CORE_ARM_CA7);
-	if (core != NULL) {
-		uint32 value = _Read4(core->wrap + AGENT_IOCTL);
-		_CoreReset(core, value & IOCTL_CR4_CPUHALT, IOCTL_CR4_CPUHALT,
-			IOCTL_CR4_CPUHALT);
-
-		brcmf_core* d11;
-		for (int i = 0; (d11 = _Core(CORE_80211, i)) != NULL; i++) {
-			_CoreDisable(d11, IOCTL_D11_PHYRESET | IOCTL_D11_PHYCLOCKEN,
-				IOCTL_D11_PHYCLOCKEN);
-		}
-		return;
-	}
-
-	core = _Core(CORE_ARM_CM3);
-	if (core != NULL) {
-		_CoreDisable(core, 0, 0);
-		brcmf_core* d11 = _Core(CORE_80211);
-		if (d11 != NULL) {
-			_CoreReset(d11, IOCTL_D11_PHYRESET | IOCTL_D11_PHYCLOCKEN,
-				IOCTL_D11_PHYCLOCKEN, IOCTL_D11_PHYCLOCKEN);
-		}
-		brcmf_core* ram = _Core(CORE_INTERNAL_MEM);
-		if (ram != NULL) {
-			_CoreReset(ram, 0, 0, 0);
-			if (fChip == 43430) {
-				_Write4(ram->base + SOCRAM_BANKIDX, 3);
-				_Write4(ram->base + SOCRAM_BANKPDA, 0);
-			}
-		}
-	}
-}
-
-
-status_t
-Brcmf::_SetActive(uint32 resetVector)
-{
-	brcmf_core* core = _Core(CORE_ARM_CR4);
-	if (core == NULL)
-		core = _Core(CORE_ARM_CA7);
-	if (core != NULL) {
-		_DevWrite(SD_INTSTATUS, 0xffffffff);
-		if (resetVector != 0) {
-			uint8 vector[4];
-			put32(vector, resetVector);
-			_RamReadWrite(0, vector, 4, true);
-		}
-		_CoreReset(core, IOCTL_CR4_CPUHALT, 0, 0);
-		return B_OK;
-	}
-
-	core = _Core(CORE_ARM_CM3);
-	if (core != NULL) {
-		brcmf_core* ram = _Core(CORE_INTERNAL_MEM);
-		if (ram == NULL || !_CoreIsUp(ram))
-			return B_ERROR;
-		_DevWrite(SD_INTSTATUS, 0xffffffff);
-		_CoreReset(core, 0, 0, 0);
-		return B_OK;
-	}
-
-	return B_ERROR;
 }
 
 
@@ -938,102 +640,16 @@ Brcmf::_ChipAttach()
 	spin(65);
 	_Write1(F1_SDIOPULLUP, 0);
 
-	uint32 id = _Read4(CHIP_BASE + CHIP_REG_CHIPID);
-	fChip = id & 0xffff;
-	fChipRev = (id >> 16) & 0xf;
-	uint32 interconnect = (id >> 28) & 0xf;
-	INFO("chip %s%x (%u) revision %u, interconnect %" B_PRIu32 "\n",
-		fChip > 0xa000 ? "" : "BCM", fChip, fChip, fChipRev, interconnect);
-	if (interconnect != 1) {
-		ERROR("unsupported interconnect type %" B_PRIu32 "\n", interconnect);
-		return B_NOT_SUPPORTED;
-	}
+	status_t status = fChipInfo.Attach(this);
+	if (status != B_OK)
+		return status;
 
-	_EromScan();
-
-	bool cpuFound = false;
-	for (int32 i = 0; i < fCoreCount; i++) {
-		TRACE("core %#x rev %u base %#" B_PRIx32 " wrap %#" B_PRIx32 "\n",
-			fCores[i].id, fCores[i].rev, fCores[i].base, fCores[i].wrap);
-		switch (fCores[i].id) {
-			case CORE_ARM_CM3:
-			case CORE_ARM_CR4:
-			case CORE_ARM_CA7:
-				cpuFound = true;
-				break;
-		}
-	}
-	INFO("%" B_PRId32 " cores found\n", fCoreCount);
-	if (!cpuFound) {
-		ERROR("CPU core not found\n");
-		return B_ERROR;
-	}
-
-	brcmf_core* sdio = _Core(CORE_SDIO_DEV);
-	brcmf_core* cc = _Core(CORE_CHIPCOMMON);
-	if (sdio == NULL || cc == NULL) {
-		ERROR("SDIO or chipcommon core not found\n");
+	const brcmf_chip_core* sdio = fChipInfo.Core(BRCMF_CORE_SDIO_DEV);
+	if (sdio == NULL) {
+		ERROR("SDIO core not found\n");
 		return B_ERROR;
 	}
 	fSdioCoreBase = sdio->base;
-
-	_SetPassive();
-
-	// RAM size
-	brcmf_core* core;
-	if ((core = _Core(CORE_ARM_CR4)) != NULL) {
-		uint32 cap = _Read4(core->base + CR4_CAP);
-		uint32 banks = (cap & 0xf) + ((cap >> 4) & 0xf);
-		uint32 size = 0;
-		for (uint32 i = 0; i < banks; i++) {
-			_Write4(core->base + CR4_BANKIDX, i);
-			uint32 info = _Read4(core->base + CR4_BANKINFO);
-			uint32 blockSize = (info & 0x200) != 0 ? 1024 : 8192;
-			size += ((info & 0x7f) + 1) * blockSize;
-		}
-		fRamSize = size;
-		switch (fChip) {
-			case 0x4345:
-				fRamBase = 0x198000;
-				break;
-			case 0x4335:
-			case 0x4339:
-			case 0x4350:
-			case 0x4354:
-			case 0x4356:
-				fRamBase = 0x180000;
-				break;
-			default:
-				ERROR("unknown RAM base for chip %#x\n", fChip);
-				return B_NOT_SUPPORTED;
-		}
-	} else if ((core = _Core(CORE_INTERNAL_MEM)) != NULL) {
-		if (!_CoreIsUp(core))
-			_CoreReset(core, 0, 0, 0);
-		uint32 info = _Read4(core->base + SOCRAM_COREINFO);
-		uint32 banks = (info >> 4) & 0xf;
-		uint32 size = 0;
-		if (core->rev <= 7 || core->rev == 12) {
-			ERROR("unsupported SOCRAM revision %u\n", core->rev);
-			return B_NOT_SUPPORTED;
-		}
-		for (uint32 i = 0; i < banks; i++) {
-			_Write4(core->base + SOCRAM_BANKIDX, i);
-			uint32 bank = _Read4(core->base + SOCRAM_BANKINFO);
-			size += ((bank & 0x7f) + 1) * 8192;
-		}
-		fRamSize = size;
-		fRamBase = 0;
-	} else {
-		ERROR("no RAM core\n");
-		return B_ERROR;
-	}
-	INFO("RAM %" B_PRIu32 " KB at %#" B_PRIx32 "\n", fRamSize / 1024,
-		fRamBase);
-
-	fCcCaps = _Read4(cc->base + CHIP_REG_CAPS);
-	fCcCapsExt = _Read4(cc->base + CHIP_REG_CAPS_EXT);
-
 	return B_OK;
 }
 
@@ -1068,7 +684,7 @@ Brcmf::Probe()
 	if (status != B_OK)
 		return status;
 
-	brcmf_core* sdio = _Core(CORE_SDIO_DEV);
+	const brcmf_chip_core* sdio = fChipInfo.Core(BRCMF_CORE_SDIO_DEV);
 	if (sdio->rev >= 12) {
 		uint8 value = _Read1(F1_SLEEPCSR);
 		if ((value & SLEEPCSR_KSO) == 0)
@@ -1078,7 +694,7 @@ Brcmf::Probe()
 	_Write1(CCCR_BRCM_CARDCTRL,
 		_Read1(CCCR_BRCM_CARDCTRL) | CARDCTRL_WLANRESET);
 
-	brcmf_core* pmu = _Pmu();
+	const brcmf_chip_core* pmu = fChipInfo.Pmu();
 	if (pmu != NULL) {
 		_Write4(pmu->base + CHIP_REG_PMUCONTROL,
 			_Read4(pmu->base + CHIP_REG_PMUCONTROL) | (0x2 << 13));
@@ -1228,17 +844,19 @@ Brcmf::_ConvertNvram(uint8* data, size_t size, uint8** _nvram,
 status_t
 Brcmf::_LoadFirmware()
 {
-	switch (fChip) {
+	uint16 chip = fChipInfo.Chip();
+	uint8 chipRev = fChipInfo.ChipRev();
+	switch (chip) {
 		case 0x4345:
-			strlcpy(fFirmwareBase, fChipRev == 9 ? "brcmfmac43456-sdio"
+			strlcpy(fFirmwareBase, chipRev == 9 ? "brcmfmac43456-sdio"
 				: "brcmfmac43455-sdio", sizeof(fFirmwareBase));
 			break;
 		case 43430:
-			strlcpy(fFirmwareBase, fChipRev == 2 ? "brcmfmac43436-sdio"
+			strlcpy(fFirmwareBase, chipRev == 2 ? "brcmfmac43436-sdio"
 				: "brcmfmac43430-sdio", sizeof(fFirmwareBase));
 			break;
 		default:
-			ERROR("no firmware known for chip %#x\n", fChip);
+			ERROR("no firmware known for chip %#x\n", chip);
 			return B_NOT_SUPPORTED;
 	}
 
@@ -1278,7 +896,8 @@ Brcmf::_LoadFirmware()
 	uint8* verify = NULL;
 	bigtime_t start = system_time();
 	if (status == B_OK) {
-		status = _RamReadWrite(fRamBase, firmware, firmwareSize, true);
+		status = _RamReadWrite(fChipInfo.RamBase(), firmware, firmwareSize,
+			true);
 		if (status != B_OK)
 			ERROR("firmware upload failed: %s\n", strerror(status));
 	}
@@ -1288,7 +907,8 @@ Brcmf::_LoadFirmware()
 			status = B_NO_MEMORY;
 	}
 	if (status == B_OK) {
-		status = _RamReadWrite(fRamBase, verify, firmwareSize, false);
+		status = _RamReadWrite(fChipInfo.RamBase(), verify, firmwareSize,
+			false);
 		if (status == B_OK && memcmp(verify, firmware, firmwareSize) != 0) {
 			size_t offset = 0;
 			while (offset < firmwareSize && verify[offset] == firmware[offset])
@@ -1299,7 +919,8 @@ Brcmf::_LoadFirmware()
 		}
 	}
 	if (status == B_OK) {
-		uint32 address = fRamBase + fRamSize - nvramLength;
+		uint32 address = fChipInfo.RamBase() + fChipInfo.RamSize()
+			- nvramLength;
 		status = _RamReadWrite(address, nvram, nvramLength, true);
 		if (status == B_OK) {
 			status = _RamReadWrite(address, verify, nvramLength, false);
@@ -1312,7 +933,7 @@ Brcmf::_LoadFirmware()
 	if (status == B_OK) {
 		INFO("firmware uploaded in %" B_PRId64 " ms\n",
 			(system_time() - start) / 1000);
-		status = _SetActive(get32(firmware));
+		status = fChipInfo.SetActive(get32(firmware));
 	}
 
 	free(verify);
@@ -2095,6 +1716,8 @@ Brcmf::_SetLink(bool up)
 		return;
 	fLinkUp = up;
 	INFO("link %s\n", up ? "up" : "down");
+	if (!up && fTransport != NULL)
+		fTransport->TransportLinkDown();
 
 	if (fLinkStateSem >= 0)
 		release_sem_etc(fLinkStateSem, 1, B_DO_NOT_RESCHEDULE);
@@ -2213,8 +1836,10 @@ Brcmf::_HandleScanResult(uint8* data, size_t length, uint32 status)
 		if (!fScanning)
 			return;
 		fScanning = false;
-		// forget about networks that were not seen in this scan
-		for (int32 i = 0; i < fScanCount;) {
+		// Forget about networks that were not seen in this scan, unless it
+		// looked for one network only (as wpa_supplicant does when it
+		// reconnects): then the others were not looked for.
+		for (int32 i = 0; i < fScanCount && !fScanForSsid;) {
 			if (!fScanResults[i]->seen) {
 				free(fScanResults[i]);
 				fScanResults[i] = fScanResults[--fScanCount];
@@ -2303,6 +1928,7 @@ Brcmf::StartScan(const uint8* ssid, size_t ssidLength)
 		if (fScanning)
 			return B_BUSY;
 		fScanning = true;
+		fScanForSsid = ssid != NULL && ssidLength > 0 && ssidLength <= 32;
 		for (int32 i = 0; i < fScanCount; i++)
 			fScanResults[i]->seen = false;
 	}

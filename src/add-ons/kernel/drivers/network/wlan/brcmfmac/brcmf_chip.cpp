@@ -23,9 +23,9 @@
  *
  * Provenance: follows OpenBSD's bwfm(4) chip code (sys/dev/ic/bwfm.c:
  * bwfm_chip_attach(), the AI core reset, the DMP EROM scan, the CR4
- * passive/active and TCM RAM size functions), as already written for the
- * SDIO chips in brcmf.cpp by Bryan Irvine. Linux brcmfmac (ISC) compared
- * only.
+ * passive/active, CM3 passive/active, TCM and SOCRAM RAM size functions),
+ * moved here from brcmf.cpp, where Bryan Irvine wrote it for the SDIO
+ * chips. Linux brcmfmac (ISC) compared only.
  */
 
 
@@ -91,6 +91,23 @@ BrcmfChip::Core(uint16 id, int index) const
 			return &fCores[i];
 	}
 	return NULL;
+}
+
+
+/*!	The core holding the PMU registers: a PMU core of its own on newer
+	chips, chipcommon otherwise.
+*/
+const brcmf_chip_core*
+BrcmfChip::Pmu() const
+{
+	const brcmf_chip_core* cc = Core(BRCMF_CORE_CHIPCOMMON);
+	if (cc != NULL && cc->rev >= 35
+		&& (fCcCapsExt & BRCMF_CAPS_EXT_AOB) != 0) {
+		const brcmf_chip_core* pmu = Core(BRCMF_CORE_PMU);
+		if (pmu != NULL)
+			return pmu;
+	}
+	return cc;
 }
 
 
@@ -264,40 +281,77 @@ BrcmfChip::_EromScan()
 }
 
 
-/*!	Halts the ARM CR4 and holds the 802.11 cores in reset, ready for a
-	firmware download. Only the CR4 (the CPU of the PCIe chips this is used
-	for) is handled.
+/*!	Halts the CPU and holds the 802.11 cores in reset, ready for a firmware
+	download: an ARM CR4 (or CA7) is held halted, an ARM CM3 is disabled
+	and its RAM core reset.
 */
 void
 BrcmfChip::SetPassive()
 {
 	const brcmf_chip_core* core = Core(BRCMF_CORE_ARM_CR4);
 	if (core == NULL)
+		core = Core(BRCMF_CORE_ARM_CA7);
+	if (core != NULL) {
+		uint32 value = _Read4(core->wrap + BRCMF_AGENT_IOCTL);
+		CoreReset(core, value & BRCMF_IOCTL_CR4_CPUHALT,
+			BRCMF_IOCTL_CR4_CPUHALT, BRCMF_IOCTL_CR4_CPUHALT);
+
+		const brcmf_chip_core* d11;
+		for (int i = 0; (d11 = Core(BRCMF_CORE_80211, i)) != NULL; i++) {
+			CoreDisable(d11,
+				BRCMF_IOCTL_D11_PHYRESET | BRCMF_IOCTL_D11_PHYCLOCKEN,
+				BRCMF_IOCTL_D11_PHYCLOCKEN);
+		}
 		return;
+	}
 
-	uint32 value = _Read4(core->wrap + BRCMF_AGENT_IOCTL);
-	CoreReset(core, value & BRCMF_IOCTL_CR4_CPUHALT, BRCMF_IOCTL_CR4_CPUHALT,
-		BRCMF_IOCTL_CR4_CPUHALT);
-
-	const brcmf_chip_core* d11;
-	for (int i = 0; (d11 = Core(BRCMF_CORE_80211, i)) != NULL; i++) {
-		CoreDisable(d11, BRCMF_IOCTL_D11_PHYRESET | BRCMF_IOCTL_D11_PHYCLOCKEN,
-			BRCMF_IOCTL_D11_PHYCLOCKEN);
+	core = Core(BRCMF_CORE_ARM_CM3);
+	if (core != NULL) {
+		CoreDisable(core, 0, 0);
+		const brcmf_chip_core* d11 = Core(BRCMF_CORE_80211);
+		if (d11 != NULL) {
+			CoreReset(d11,
+				BRCMF_IOCTL_D11_PHYRESET | BRCMF_IOCTL_D11_PHYCLOCKEN,
+				BRCMF_IOCTL_D11_PHYCLOCKEN, BRCMF_IOCTL_D11_PHYCLOCKEN);
+		}
+		const brcmf_chip_core* ram = Core(BRCMF_CORE_INTERNAL_MEM);
+		if (ram != NULL) {
+			CoreReset(ram, 0, 0, 0);
+			if (fChip == 43430) {
+				_Write4(ram->base + BRCMF_SOCRAM_BANKIDX, 3);
+				_Write4(ram->base + BRCMF_SOCRAM_BANKPDA, 0);
+			}
+		}
 	}
 }
 
 
-/*!	Starts the ARM CR4 at \a resetVector (the first word of the firmware). */
+/*!	Starts the CPU: an ARM CR4 (or CA7) at \a resetVector (the first word
+	of the firmware), an ARM CM3 from its RAM.
+*/
 status_t
 BrcmfChip::SetActive(uint32 resetVector)
 {
 	const brcmf_chip_core* core = Core(BRCMF_CORE_ARM_CR4);
 	if (core == NULL)
-		return B_NOT_SUPPORTED;
+		core = Core(BRCMF_CORE_ARM_CA7);
+	if (core != NULL) {
+		fBackplane->WriteResetVector(resetVector);
+		CoreReset(core, BRCMF_IOCTL_CR4_CPUHALT, 0, 0);
+		return B_OK;
+	}
 
-	fBackplane->WriteResetVector(resetVector);
-	CoreReset(core, BRCMF_IOCTL_CR4_CPUHALT, 0, 0);
-	return B_OK;
+	core = Core(BRCMF_CORE_ARM_CM3);
+	if (core != NULL) {
+		const brcmf_chip_core* ram = Core(BRCMF_CORE_INTERNAL_MEM);
+		if (ram == NULL || !CoreIsUp(ram))
+			return B_ERROR;
+		fBackplane->WriteResetVector(0);
+		CoreReset(core, 0, 0, 0);
+		return B_OK;
+	}
+
+	return B_ERROR;
 }
 
 
@@ -305,10 +359,8 @@ status_t
 BrcmfChip::_RamInfo()
 {
 	const brcmf_chip_core* core = Core(BRCMF_CORE_ARM_CR4);
-	if (core == NULL) {
-		ERROR("no ARM CR4 core; only CR4 chips are supported on PCIe\n");
-		return B_NOT_SUPPORTED;
-	}
+	if (core == NULL)
+		return _SocramInfo();
 
 	uint32 cap = _Read4(core->base + BRCMF_CR4_CAP);
 	uint32 banks = (cap & 0xf) + ((cap >> 4) & 0xf);
@@ -346,6 +398,38 @@ BrcmfChip::_RamInfo()
 }
 
 
+/*!	RAM size of the chips with a SOCRAM core (ARM CM3 chips such as the
+	BCM43430); the RAM starts at 0.
+*/
+status_t
+BrcmfChip::_SocramInfo()
+{
+	const brcmf_chip_core* core = Core(BRCMF_CORE_INTERNAL_MEM);
+	if (core == NULL) {
+		ERROR("no RAM core\n");
+		return B_ERROR;
+	}
+	if (!CoreIsUp(core))
+		CoreReset(core, 0, 0, 0);
+	if (core->rev <= 7 || core->rev == 12) {
+		ERROR("unsupported SOCRAM revision %u\n", core->rev);
+		return B_NOT_SUPPORTED;
+	}
+
+	uint32 info = _Read4(core->base + BRCMF_SOCRAM_COREINFO);
+	uint32 banks = (info >> 4) & 0xf;
+	uint32 size = 0;
+	for (uint32 i = 0; i < banks; i++) {
+		_Write4(core->base + BRCMF_SOCRAM_BANKIDX, i);
+		uint32 bank = _Read4(core->base + BRCMF_SOCRAM_BANKINFO);
+		size += ((bank & 0x7f) + 1) * 8192;
+	}
+	fRamSize = size;
+	fRamBase = 0;
+	return B_OK;
+}
+
+
 status_t
 BrcmfChip::Attach(BrcmfBackplane* backplane)
 {
@@ -375,7 +459,7 @@ BrcmfChip::Attach(BrcmfBackplane* backplane)
 
 	bool cpuFound = false;
 	for (int32 i = 0; i < fCoreCount; i++) {
-		INFO("core %#x rev %u base %#" B_PRIx32 " wrap %#" B_PRIx32 "\n",
+		TRACE("core %#x rev %u base %#" B_PRIx32 " wrap %#" B_PRIx32 "\n",
 			fCores[i].id, fCores[i].rev, fCores[i].base, fCores[i].wrap);
 		switch (fCores[i].id) {
 			case BRCMF_CORE_ARM_CM3:
@@ -391,8 +475,8 @@ BrcmfChip::Attach(BrcmfBackplane* backplane)
 	}
 
 	SetPassive();
-	fBackplane->ResetBus();
-	SetPassive();
+	if (fBackplane->ResetBus())
+		SetPassive();
 
 	status_t status = _RamInfo();
 	if (status != B_OK)

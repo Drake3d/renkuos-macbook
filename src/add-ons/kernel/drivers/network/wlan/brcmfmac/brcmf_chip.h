@@ -23,9 +23,10 @@
  * EROM, resetting them, halting and starting the ARM CPU, and the size and
  * place of the RAM. The bus supplies backplane access through BrcmfBackplane.
  *
- * Follows OpenBSD's bwfm(4) (sys/dev/ic/bwfm.c 1.118, bwfmreg.h), as brcmf.cpp does
- * for the SDIO chips; this is the same logic written once for any bus. The
- * SDIO driver still has its own copy in brcmf.cpp until it is moved over.
+ * Follows OpenBSD's bwfm(4) (sys/dev/ic/bwfm.c 1.118, bwfmreg.h); moved
+ * here from brcmf.cpp, where Bryan Irvine wrote it for the SDIO chips, so
+ * that SDIO and PCIe share it. Handles ARM CR4/CA7 chips with TCM RAM and
+ * ARM CM3 chips with SOCRAM.
  */
 #ifndef BRCMF_CHIP_H
 #define BRCMF_CHIP_H
@@ -72,6 +73,11 @@ enum {
 	BRCMF_CR4_BANKIDX			= 0x40,
 	BRCMF_CR4_BANKINFO			= 0x44,
 	BRCMF_CR4_BANKPDA			= 0x4c,
+
+	BRCMF_SOCRAM_COREINFO		= 0x00,
+	BRCMF_SOCRAM_BANKIDX		= 0x10,
+	BRCMF_SOCRAM_BANKINFO		= 0x40,
+	BRCMF_SOCRAM_BANKPDA		= 0x44,
 };
 
 
@@ -92,10 +98,12 @@ public:
 	virtual	void				Write4(uint32 address, uint32 value) = 0;
 
 	// Called after the cores are known and the CPU halted, to reset the
-	// bus core side (PCIe: watchdog reset); the CPU is halted again after.
-	virtual	void				ResetBus() {}
-	// Puts the reset vector where the ARM CR4 starts (RAM address 0 for
-	// PCIe).
+	// bus core side (PCIe: watchdog reset). Returns whether it did; the CPU
+	// is then halted again.
+	virtual	bool				ResetBus() { return false; }
+	// Called just before the CPU is released: puts the reset vector where
+	// an ARM CR4 starts (RAM address 0; \a vector is 0 for a CM3, which
+	// starts from its own), and clears what the bus needs cleared.
 	virtual	void				WriteResetVector(uint32 vector) = 0;
 };
 
@@ -116,6 +124,8 @@ public:
 			uint32				RamSize() const { return fRamSize; }
 			void				SetRamSize(uint32 size) { fRamSize = size; }
 			uint32				CcCaps() const { return fCcCaps; }
+			uint32				CcCapsExt() const { return fCcCapsExt; }
+			const brcmf_chip_core* Pmu() const;
 
 			const brcmf_chip_core* Core(uint16 id, int index = 0) const;
 			int32				CountCores() const { return fCoreCount; }
@@ -142,6 +152,7 @@ private:
 			bool				_EromGetRegAddress(uint32& erom,
 									uint32& base, uint32& wrap);
 			status_t			_RamInfo();
+			status_t			_SocramInfo();
 
 private:
 			BrcmfBackplane*		fBackplane;
