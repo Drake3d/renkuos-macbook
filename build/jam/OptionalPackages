@@ -9,6 +9,7 @@
 #	DevelopmentBase			- basic development environment (gcc, headers, libs,...)
 #	DevelopmentMin			- development headers, libs, tools, from sources only
 #	APFS					- read-only Apple File System (APFS) driver
+#	BroadcomWifi			- Broadcom FullMAC PCIe Wi-Fi (work in progress)
 #	FaceTimeHD				- FaceTime HD camera of the 2015-2017 MacBook Pro
 #	Git						- the distributed version control system
 #	WebPositive				- native, WebKit-based web browser
@@ -165,6 +166,15 @@ if [ IsOptionalHaikuImagePackageAdded AppleSPIInput ] {
 if [ IsOptionalHaikuImagePackageAdded APFS ] {
 	AddPackageFilesToHaikuImage system packages : apfs.hpkg
 		: nameFromMetaInfo ;
+}
+
+
+# BroadcomWifi
+if [ IsOptionalHaikuImagePackageAdded BroadcomWifi ] {
+	if $(TARGET_ARCH) = x86 || $(TARGET_ARCH) = x86_64 {
+		AddPackageFilesToHaikuImage system packages : broadcom_wifi.hpkg
+			: nameFromMetaInfo ;
+	}
 }
 
 

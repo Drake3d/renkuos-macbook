@@ -1,0 +1,31 @@
+name			broadcom_wifi
+version			%HAIKU_VERSION%
+architecture	%HAIKU_PACKAGING_ARCH%
+summary			"Broadcom FullMAC PCIe Wi-Fi driver"
+
+description		"Driver for the Broadcom FullMAC PCIe Wi-Fi chips, such as the \
+BCM4350 of the MacBook Pro (2017). Work in progress: it starts the chip's \
+firmware but does not provide a network yet. Broadcom's firmware is not \
+included."
+
+packager		"The Haiku build system"
+vendor			"RenkuOS"
+
+copyrights		{
+	"2026 RenkuOS Contributors"
+	"2026 Bryan Irvine"
+	"2010-2016 Broadcom Corporation"
+	"2016-2017 Patrick Wildt"
+}
+licenses		{
+	"ISC"
+	"MIT"
+}
+
+provides {
+	broadcom_wifi = %HAIKU_VERSION%
+}
+
+requires {
+	haiku
+}

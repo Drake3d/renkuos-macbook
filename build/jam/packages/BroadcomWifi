@@ -1,0 +1,12 @@
+# Broadcom FullMAC PCIe Wi-Fi (brcmfmac), as a package of its own for x86:
+# the BCM4350 of the MacBookPro14,1 and similar chips. It needs no change
+# to the kernel, so it can be installed on a stock system. Broadcom's
+# firmware is not part of it; it goes into
+# /boot/system/non-packaged/data/firmware/brcm.
+
+local broadcomWifiPackage = broadcom_wifi.hpkg ;
+HaikuPackage $(broadcomWifiPackage) ;
+
+AddNewDriversToPackage network : brcmfmac ;
+
+BuildHaikuPackage $(broadcomWifiPackage) : broadcom_wifi ;
