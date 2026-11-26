@@ -5,15 +5,20 @@ SubDir HAIKU_TOP src tests add-ons kernel file_systems apfs apfs_shell ;
 #   APFS_VOLUME=<index|name> apfs_shell <image>
 
 SEARCH_SOURCE += [ FDirName $(HAIKU_TOP) src add-ons kernel file_systems apfs ] ;
+SEARCH_SOURCE += [ FDirName $(HAIKU_TOP) src add-ons kernel file_systems apfs lzfse ] ;
 SEARCH_SOURCE += [ FDirName $(HAIKU_TOP) src add-ons kernel file_systems shared ] ;
 
 # prevent inclusion of HaikuBuildCompatibility.h and _BSD_SOURCE headers
 DEFINES += HAIKU_BUILD_COMPATIBILITY_H __STRICT_ANSI__ ;
 
 {
-	local defines = [ FDefines FS_SHELL ] ;
-	SubDirCcFlags $(defines) -Wno-multichar ;
+	local defines = [ FDefines FS_SHELL Z_SOLO NDEBUG ] ;
+		# Z_SOLO: no system headers from zlib.h; NDEBUG: no assert() in
+		# Apple's LZFSE/LZVN decoder.
+	SubDirCcFlags $(defines) -Wno-multichar -Wno-sign-compare
+		-Wno-missing-prototypes -Wno-cast-align ;
 	SubDirC++Flags $(defines) -Wno-multichar -fno-rtti ;
+	HOST_LINKFLAGS += -lz ;
 }
 
 local fsShellCommandLibs ;
@@ -34,22 +39,31 @@ UsePrivateHeaders file_systems ;
 UseHeaders [ FDirName $(HAIKU_TOP) headers private ] : true ;
 UseHeaders [ FDirName $(HAIKU_TOP) src tools fs_shell ] ;
 UseHeaders [ FDirName $(HAIKU_TOP) src add-ons kernel file_systems shared ] : true ;
+UseHeaders [ FDirName $(HAIKU_TOP) src add-ons kernel file_systems apfs lzfse ] : true ;
 
 local apfsSources =
 	BTree.cpp
 	Checksum.cpp
 	Container.cpp
+	Decmpfs.cpp
 	Inode.cpp
 	kernel_interface.cpp
 	ObjectMap.cpp
 	Volume.cpp
+	;
+local lzfseSources =
+	lzfse_decode.c
+	lzfse_decode_base.c
+	lzfse_fse.c
+	lzvn_decode_base.c
 	;
 local sharedSources =
 	crc32.cpp
 	DeviceOpener.cpp
 	;
 
-BuildPlatformMergeObject <build>apfs_shell.o : $(apfsSources) $(sharedSources) ;
+BuildPlatformMergeObject <build>apfs_shell.o
+	: $(apfsSources) $(lzfseSources) $(sharedSources) ;
 
 BuildPlatformMain <build>apfs_shell
 	:

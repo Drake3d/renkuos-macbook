@@ -4,28 +4,50 @@ UsePrivateHeaders [ FDirName kernel util ] ;
 UsePrivateHeaders shared storage file_systems ;
 UsePrivateKernelHeaders ;
 UseHeaders [ FDirName $(HAIKU_TOP) src add-ons kernel file_systems shared ] : true ;
+UseHeaders [ FDirName $(SUBDIR) lzfse ] : true ;
+UseBuildFeatureHeaders zlib ;
 
 SubDirC++Flags -Wno-multichar ;
+# Apple's LZFSE/LZVN decoder (the only C files here): its assert() checks
+# are compiled out; it is kept unmodified, so its signedness and prototype
+# warnings are silenced instead of edited away.
+SubDirCcFlags -DNDEBUG -Wno-sign-compare -Wno-missing-prototypes ;
 
 local apfsSources =
 	BTree.cpp
 	Checksum.cpp
 	Container.cpp
+	Decmpfs.cpp
 	Inode.cpp
 	kernel_interface.cpp
 	ObjectMap.cpp
 	Volume.cpp
+	;
+local lzfseSources =
+	lzfse_decode.c
+	lzfse_decode_base.c
+	lzfse_fse.c
+	lzvn_decode_base.c
 	;
 local sharedSources =
 	crc32.cpp
 	DeviceOpener.cpp
 	;
 
+Includes [ FGristFiles Decmpfs.cpp ]
+	: [ BuildFeatureAttribute zlib : headers ] ;
+
 KernelAddon apfs :
 	$(apfsSources)
+	$(lzfseSources)
 	$(sharedSources)
 	kernel_cpp.cpp
+	:
+	kernel_libz.a
 	;
+
+SEARCH on [ FGristFiles $(lzfseSources) ]
+	= [ FDirName $(SUBDIR) lzfse ] ;
 
 SEARCH on [ FGristFiles $(sharedSources) ]
 	= [ FDirName $(HAIKU_TOP) src add-ons kernel file_systems shared ] ;

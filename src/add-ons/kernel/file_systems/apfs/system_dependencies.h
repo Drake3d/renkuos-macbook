@@ -10,6 +10,7 @@
 
 #include "fssh_api_wrapper.h"
 #include "fssh_auto_deleter.h"
+#include "fssh_auto_locker.h"
 #include "fssh_kernel_priv.h"
 
 #else	// !FS_SHELL

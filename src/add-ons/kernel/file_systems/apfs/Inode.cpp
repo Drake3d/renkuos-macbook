@@ -16,6 +16,7 @@
 
 #include "BTree.h"
 #include "Container.h"
+#include "Decmpfs.h"
 #include "Volume.h"
 
 #include <CRCTable.h>
@@ -111,7 +112,8 @@ Inode::Inode(Volume* volume, ino_t id)
 	fAccessTime(0),
 	fReportedCompressed(false),
 	fCache(NULL),
-	fMap(NULL)
+	fMap(NULL),
+	fDecmpfs(NULL)
 {
 }
 
@@ -122,6 +124,7 @@ Inode::~Inode()
 		file_cache_delete(fCache);
 	if (fMap != NULL)
 		file_map_delete(fMap);
+	delete fDecmpfs;
 }
 
 
@@ -190,12 +193,31 @@ Inode::Init()
 			fSize = length;
 	}
 
-	// The file cache and file map need the data to be on disk as is, so
-	// compressed files (decmpfs) keep using ReadAt().
-	if (IsFile() && !IsCompressed()) {
+	// Compressed files (decmpfs): the size is in their compression header;
+	// their pages are decompressed by the io/read_pages hooks.
+	if (IsFile() && IsCompressed()) {
+		fDecmpfs = new(std::nothrow) Decmpfs(this);
+		if (fDecmpfs == NULL)
+			return B_NO_MEMORY;
+		status = fDecmpfs->Init();
+		if (status == B_OK) {
+			fSize = fDecmpfs->Size();
+		} else {
+			// Keep the node usable (stat, attributes); reads fail.
+			delete fDecmpfs;
+			fDecmpfs = NULL;
+		}
+	}
+
+	// The file map needs the data on disk as is: uncompressed files only.
+	if (IsFile() && (!IsCompressed() || fDecmpfs != NULL)) {
 		fCache = file_cache_create(fVolume->ID(), fID, fSize);
+		if (fCache == NULL)
+			return B_NO_MEMORY;
+	}
+	if (IsFile() && !IsCompressed()) {
 		fMap = file_map_create(fVolume->ID(), fID, fSize);
-		if (fCache == NULL || fMap == NULL)
+		if (fMap == NULL)
 			return B_NO_MEMORY;
 	}
 
@@ -290,6 +312,17 @@ Inode::FindExtent(off_t pos, off_t* _diskOffset, off_t* _length)
 
 
 status_t
+Inode::ReadCompressed(off_t pos, uint8* buffer, size_t* _length)
+{
+	if (fDecmpfs == NULL) {
+		*_length = 0;
+		return B_NOT_SUPPORTED;
+	}
+	return fDecmpfs->Read(pos, buffer, _length);
+}
+
+
+status_t
 Inode::Read(off_t pos, void* buffer, size_t* _length)
 {
 	if (fCache == NULL)
@@ -361,8 +394,8 @@ Inode::ReadAt(off_t pos, void* buffer, size_t* _length)
 	if (IsCompressed()) {
 		*_length = 0;
 		if (!fReportedCompressed) {
-			INFORM("inode %" B_PRIdINO " is compressed; compressed files "
-				"cannot be read yet\n", fID);
+			INFORM("inode %" B_PRIdINO " is compressed and its compression "
+				"header could not be read\n", fID);
 			fReportedCompressed = true;
 		}
 		return B_NOT_SUPPORTED;
@@ -1011,6 +1044,18 @@ AttributeIterator::GetNext(char* name, size_t* _length)
 		// The stored length counts the final null.
 		if (nameLength > 0 && xattrKey->name[nameLength - 1] == '\0')
 			nameLength--;
+
+		// A compressed file's data lives in these two; macOS does not show
+		// them either.
+		if (fInode->IsCompressed()
+			&& ((nameLength == strlen(APFS_DECMPFS_ATTRIBUTE_NAME)
+					&& memcmp(xattrKey->name, APFS_DECMPFS_ATTRIBUTE_NAME,
+						nameLength) == 0)
+				|| (nameLength == strlen(APFS_RESOURCE_FORK_NAME)
+					&& memcmp(xattrKey->name, APFS_RESOURCE_FORK_NAME,
+						nameLength) == 0)))
+			continue;
+
 		if (nameLength + 1 > *_length) {
 			// Longer than an attribute name can be here; skip it.
 			continue;

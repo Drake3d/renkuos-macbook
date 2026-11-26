@@ -25,6 +25,13 @@
 #             10000 bytes, over XATTR_MAX_EMBEDDED_SIZE), a symlink whose
 #             target attribute must stay hidden, and, if SYSINFO names a
 #             RenkuOS x86_64 binary, that program (to run it from APFS).
+# comp.dmg    compressed files (decmpfs): macOS-compressed man pages,
+#             developer tools and app resources copied with ditto
+#             --preserveHFSCompression, files compressed by ditto
+#             --hfsCompression, and hand-built files of every type made by
+#             craft_decmpfs.py. Made by hand (the source files differ from
+#             Mac to Mac); compare apfs_shell's copy with "cat" of the
+#             originals on the Mac.
 
 set -e
 

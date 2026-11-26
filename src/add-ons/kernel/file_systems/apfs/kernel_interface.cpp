@@ -10,6 +10,8 @@
  * Milestone 2: directories, stat, symlinks and reading uncompressed files.
  * Milestone 3: files go through the file cache and file map (read_pages,
  * io, get_file_map), so they can be memory-mapped and executed.
+ * Milestone 4: compressed files (decmpfs) go through the file cache too;
+ * read_pages and io decompress their pages.
  */
 
 
@@ -17,6 +19,7 @@
 
 #include <file_systems/fs_ops_support.h>
 
+#include "Decmpfs.h"
 #include "Inode.h"
 #include "Volume.h"
 
@@ -261,6 +264,74 @@ iterative_io_finished_hook(void* cookie, io_request* request, status_t status,
 }
 
 
+/*!	Fills pages of a compressed file: decompresses [pos, pos + *_numBytes)
+	into the given kernel buffers.
+*/
+static status_t
+read_compressed_pages(Inode* inode, off_t pos, const iovec* vecs,
+	size_t count, size_t* _numBytes)
+{
+	size_t wanted = *_numBytes;
+	size_t done = 0;
+	for (size_t i = 0; i < count && done < wanted; i++) {
+		size_t length = vecs[i].iov_len;
+		if (length > wanted - done)
+			length = wanted - done;
+
+		size_t read = length;
+		status_t status = inode->ReadCompressed(pos + done,
+			(uint8*)vecs[i].iov_base, &read);
+		if (status != B_OK) {
+			*_numBytes = done;
+			return done > 0 ? B_OK : status;
+		}
+		// Past the end of the file, pages are filled with zeros.
+		if (read < length)
+			memset((uint8*)vecs[i].iov_base + read, 0, length - read);
+		done += length;
+	}
+	*_numBytes = done;
+	return B_OK;
+}
+
+
+#ifndef FS_SHELL
+static status_t
+do_compressed_io(Inode* inode, io_request* request)
+{
+	off_t offset = io_request_offset(request);
+	off_t length = io_request_length(request);
+
+	uint8* buffer = (uint8*)malloc(APFS_IO_SIZE);
+	if (buffer == NULL) {
+		notify_io_request(request, B_NO_MEMORY);
+		return B_NO_MEMORY;
+	}
+
+	status_t status = B_OK;
+	off_t done = 0;
+	while (done < length) {
+		size_t chunk = length - done > APFS_IO_SIZE
+			? APFS_IO_SIZE : length - done;
+		size_t read = chunk;
+		status = inode->ReadCompressed(offset + done, buffer, &read);
+		if (status != B_OK)
+			break;
+		if (read < chunk)
+			memset(buffer + read, 0, chunk - read);
+		status = write_to_io_request(request, buffer, chunk);
+		if (status != B_OK)
+			break;
+		done += chunk;
+	}
+
+	free(buffer);
+	notify_io_request(request, status);
+	return status;
+}
+#endif
+
+
 static bool
 apfs_can_page(fs_volume* _volume, fs_vnode* _node, void* _cookie)
 {
@@ -276,6 +347,8 @@ apfs_read_pages(fs_volume* _volume, fs_vnode* _node, void* _cookie,
 	Volume* volume = (Volume*)_volume->private_volume;
 	Inode* inode = (Inode*)_node->private_node;
 
+	if (inode->Compression() != NULL)
+		return read_compressed_pages(inode, pos, vecs, count, _numBytes);
 	if (inode->FileMap() == NULL)
 		return B_BAD_VALUE;
 
@@ -330,6 +403,11 @@ apfs_io(fs_volume* _volume, fs_vnode* _node, void* _cookie,
 		notify_io_request(request, B_READ_ONLY_DEVICE);
 		return B_READ_ONLY_DEVICE;
 	}
+#endif
+
+#ifndef FS_SHELL
+	if (inode->Compression() != NULL)
+		return do_compressed_io(inode, request);
 #endif
 
 	if (inode->FileMap() == NULL) {
@@ -696,6 +774,12 @@ apfs_open_attr(fs_volume* _volume, fs_vnode* _node, const char* name,
 	status_t status = inode->CheckPermissions(R_OK);
 	if (status != B_OK)
 		return status;
+
+	// Hidden: the compressed data of a compressed file.
+	if (inode->IsCompressed()
+		&& (strcmp(name, APFS_DECMPFS_ATTRIBUTE_NAME) == 0
+			|| strcmp(name, APFS_RESOURCE_FORK_NAME) == 0))
+		return B_ENTRY_NOT_FOUND;
 
 	apfs_attribute* attribute
 		= (apfs_attribute*)malloc(sizeof(apfs_attribute));

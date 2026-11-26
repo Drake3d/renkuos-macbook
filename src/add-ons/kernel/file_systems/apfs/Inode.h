@@ -10,6 +10,7 @@
 
 
 class BTreeIterator;
+class Decmpfs;
 class Volume;
 
 
@@ -84,9 +85,15 @@ public:
 
 			status_t			CheckPermissions(int accessMode) const;
 
-			// Regular, uncompressed files are read through the file cache.
+			// Regular files are read through the file cache; uncompressed
+			// ones also have a file map (their data is on disk as is).
 			void*				FileCache() const { return fCache; }
 			void*				FileMap() const { return fMap; }
+			Decmpfs*			Compression() const { return fDecmpfs; }
+
+			// Decompresses part of a compressed file into a kernel buffer.
+			status_t			ReadCompressed(off_t pos, uint8* buffer,
+									size_t* _length);
 
 			// Where file offset pos is on the device: *_diskOffset is a byte
 			// offset on the container's device, or -1 for a hole;
@@ -140,6 +147,7 @@ private:
 			bool				fReportedCompressed;
 			void*				fCache;
 			void*				fMap;
+			Decmpfs*			fDecmpfs;
 };
 
 
