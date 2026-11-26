@@ -81,3 +81,12 @@ it is split as above.
   within one minute's summary: 95467 frames, 93958 of them full size,
   18.9 Mbit/s averaged over that minute (so at least that), no drops,
   all 255 RX buffers kept posted.
+
+## Other architectures (2026-11-26)
+- arm64: the whole driver (SDIO and PCIe sides) builds with no warnings;
+  all 64 kernel symbols it uses are in the arm64 kernel.so. Not run on a
+  Raspberry Pi yet.
+- 32-bit x86: all 8 sources compile with GCC 13 for i586 with the kernel
+  flags, no warnings. Not linked (plain x86 has no package snapshot) and
+  not tried with GCC 2.95, which the x86_gcc2h hybrid may use for kernel
+  drivers. Details in HANDOFF.md, "Other architectures".

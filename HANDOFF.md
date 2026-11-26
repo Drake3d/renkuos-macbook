@@ -99,6 +99,30 @@ installed (images include `apfs.hpkg`), a test copy in `non-packaged` is
 silently ignored and the old driver keeps running. Install the new
 `.hpkg` in `/boot/system/packages` instead, as for Wi-Fi and the camera.
 
+### Other architectures (built 2026-11-26)
+
+Cross tools (GCC 13.3.0) are built in `generated.arm64` (`aarch64-unknown-haiku`)
+and `generated.x86` (`i586-pc-haiku`), about 250 MB each, with
+`../configure --cross-tools-source ../../buildtools --build-cross-tools <arch> -j8`
+(one at a time: the gcc build tree needs a few GB while it runs).
+
+- arm64: `jam -q -j8 brcmfmac` works. The RenkuOS arm64 package server
+  (`renkuos.freemyip.com/repo/renkuosports/arm64`) keeps every package in
+  one flat `packages/` folder, but jam fetches `<url>/<checksum>/packages/`,
+  so downloads 404. Do what CI does: fetch the package jam names from
+  `<url>/packages/<file>` into `generated.arm64/download/` and run jam again
+  (the driver needed only `gcc_syslibs_devel-13.3.0_2023_08_10-7-arm64.hpkg`).
+- Plain x86 cannot build: `build/jam/repositories/HaikuPorts/x86` dates from
+  2018 and upstream has no snapshot for it (needs `gcc_syslibs_devel-5.4.0`,
+  404). RenkuOS's 32-bit image is the `x86_gcc2h` hybrid (GCC 2.95 plus GCC 13
+  for x86), and GCC 2.95 cannot be built on an Apple Silicon Mac: its build
+  needs a 32-bit host compiler (`-m32`). CI builds it on Linux; a Linux machine
+  or the CI cross-compiler container would be needed here. For a compile
+  check, take jam's commands (`jam -n -a -dx '<src!...>file.o'` in
+  `generated.x86`) and point the `gcc_syslibs_devel` header paths at
+  `cross-tools-x86/i586-pc-haiku/include/c++/13.3.0` and
+  `cross-tools-x86/lib/gcc/i586-pc-haiku/13.3.0/include{,-fixed}`.
+
 Disk space: `/Volumes/Source` is an 18 GB image and fills up; on
 2026-11-25 builds failed with 112 MB free. Keep large test images
 elsewhere (the APFS ones are on "NEW FAT VOL" in `apfs-test/`).
@@ -200,9 +224,12 @@ them.
 
 ## Open items
 
-1. Wi-Fi: build for arm64 and test on a Raspberry Pi 4/400 (the SDIO
-   side now uses brcmf_chip.cpp; compile-checked on x86_64 only, as there
-   is no arm64 toolchain and too little disk here to build one). Tested
+1. Wi-Fi: test on a Raspberry Pi 4/400 (the SDIO side now uses
+   brcmf_chip.cpp). On 2026-11-26 it built for arm64 with no warnings and
+   every kernel symbol it uses resolves against the arm64 kernel.so; not
+   run on a Pi yet. 32-bit x86: all sources compile with GCC 13
+   (i586, kernel flags, no warnings), but it is not linked and not
+   compiled with GCC 2.95 (see "Other architectures"). Tested
    on the MacBook: Network preferences, 5 GHz at 400 Mbit/s, a 140 MB
    download (at least 19 Mbit/s), uploads at ~27 Mbit/s, idle. Not tried:
    sleep (RenkuOS has no system suspend). For speed tests use
