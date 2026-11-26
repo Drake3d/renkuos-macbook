@@ -10,9 +10,9 @@ camera work and the built-in Wi-Fi).
 - Code: github.com/Drake3d/renkuos-macbook.
   - `wifi` (work here): `apfs` plus 3 camera commits (settings kept across
     restarts, idle power-down, picture sizes/mirror/CodyCam settings) and
-    4 Wi-Fi commits, then the microphone gain commit. Tip: `e707a92fb1`
-    "hda: cs8409: start the internal microphones at +9 dB". Pushed
-    2026-11-26.
+    4 Wi-Fi commits, then the microphone gain commit (`e707a92fb1`) and
+    APFS type 4 compression. Tip: `9b7dae4981` "apfs: read compressed
+    files of type 4 (zlib in a resource fork)". Pushed 2026-11-26.
   - `apfs`: `apple-spi-input` plus the APFS driver, milestones 1-5
     (`personal/apfs` tip `8d6d75b8a4`). The 3 camera commits sit on the
     local `apfs` too but were pushed only as part of `wifi`.
@@ -193,7 +193,8 @@ Build, test the nightly on the MacBook, then commit the merge.
   the MacBook, including a fresh install with the camera files built in.
 - APFS, read-only (branch `apfs`, 5 commits; see apfs-readonly-design.md):
   containers and volumes, folders, files, symlinks, hard links, extended
-  attributes, compressed files (LZVN, LZFSE, zlib), programs run from
+  attributes, compressed files (every decmpfs type: LZVN, LZFSE, zlib,
+  type 4 since `9b7dae4981`), programs run from
   APFS, free space as macOS reports it; package `apfs.hpkg` (optional
   image package APFS). Tested on images and on two 4 TB macOS SSDs.
 - Built-in Wi-Fi, BCM4350 (branch `wifi`, 4 commits; see
@@ -282,9 +283,8 @@ them.
    package's hda). Run its `uninstall.sh` and reboot when an image with
    `e707a92fb1` is installed.
 7. APFS: names typed in a different Unicode normalization than macOS
-   stored (needs NFD and case-folding tables in the kernel); compressed
-   files of type 4 (zlib in a classic resource fork, Mac OS X 10.6-10.10,
-   refused today); snapshots; FileVault volumes; write support.
+   stored (needs NFD and case-folding tables in the kernel); snapshots;
+   FileVault volumes; write support.
 
 ## Notes in this branch
 

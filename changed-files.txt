@@ -1,7 +1,7 @@
 Existing RenkuOS files changed by our work
 ==========================================
 
-Branch `wifi` at e707a92fb1, compared with RenkuOS main at 7b0177e735
+Branch `wifi` at 9b7dae4981, compared with RenkuOS main at 7b0177e735
 (the merge base). Lines are added / removed. Every other file of ours is
 new. Regenerate with:
   git diff --numstat --diff-filter=M $(git merge-base wifi origin/main) wifi

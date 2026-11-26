@@ -22,13 +22,16 @@ images made by macOS (section 11).
   free space from the space manager (matches macOS); metadata fuzzing with
   re-sealed checksums (240 runs, no crash or hang, under Guard Malloc);
   nightly ISO with the package built in, tested on the MacBook.
+- Type 4 (9b7dae4981, 2026-11-26): zlib chunks in a classic resource fork,
+  used by App Store apps. Layout checked against 54 real files (PCalc.app);
+  all 1129 files of a macOS copy of PCalc.app read back identical, in
+  apfs_shell and on the MacBook.
 - Tested on real drives: two 4 TB macOS APFS SSDs (largest: 82040 files,
   8809-node tree), movie playback, running programs.
 
 Open: non-ASCII names in other normalization forms (needs Unicode NFD and
-case-folding tables in the kernel), decmpfs type 4 (zlib in a classic
-resource fork; macOS would not confirm the layout), snapshots, encrypted
-volumes, write support.
+case-folding tables in the kernel), snapshots, encrypted volumes, write
+support.
 
 Goal of this stage: mount unencrypted APFS volumes read-only in RenkuOS and
 read every file, directory, symlink and attribute on them, including
@@ -160,6 +163,16 @@ Compression types (**verify** numbers): uncompressed inline, zlib, LZVN,
 LZFSE, each as "inline in the attribute" or "in the resource fork" in
 chunks of 64 KiB. Reads decompress whole chunks into a small cache;
 `read_stat` reports the uncompressed size from the decmpfs header.
+
+Type 4 (zlib, resource fork) is a classic Mac resource fork with one
+'cmpf' resource: big-endian header (data offset 0x100, map offset, data
+length, map length); at the data offset a big-endian resource length;
+then the resource: little-endian chunk count, (offset, size) pairs
+counted from the start of the resource, then the chunks (zlib, or 0xff
+plus the data stored raw). macOS refuses type 4 files built by hand
+(craft_decmpfs.py), probably over the resource map, so test with real
+ones: App Store apps copied with `ditto --preserveHFSCompression`. To
+find them, read com.apple.decmpfs with getxattr(XATTR_SHOWCOMPRESSION).
 zlib from the kernel's `kernel_libz.a`; LZVN/LZFSE from Apple's BSD code.
 
 ## 7. Not in the first stage
