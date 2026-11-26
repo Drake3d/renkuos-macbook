@@ -21,15 +21,22 @@ struct apfs_attribute;
 // com.apple.decmpfs attribute: 16-byte header (magic 'fpmc', type,
 // uncompressed size), then for the "in attribute" types the data.
 // Resource-fork types keep the data in the com.apple.ResourceFork
-// attribute: a table of 32-bit little-endian offsets (one per 64 KiB chunk,
-// then the end; the first equals the table size), then the chunks.
+// attribute, in 64 KiB chunks:
+// - types 8 and 12: a table of 32-bit little-endian offsets (one per
+//   chunk, then the end; the first equals the table size), then the chunks;
+// - type 4: a classic Mac resource fork holding one 'cmpf' resource. The
+//   fork header is big endian (data offset, map offset, data length, map
+//   length); at the data offset a 32-bit big-endian resource length, then
+//   the resource: a 32-bit little-endian chunk count, (offset, size) pairs
+//   of 32-bit little-endian values counted from the start of the resource,
+//   then the chunks. Checked against 54 App Store files macOS reads.
 #define APFS_DECMPFS_MAGIC				0x636d7066	// 'fpmc' on disk
 #define APFS_DECMPFS_HEADER_SIZE		16
 #define APFS_DECMPFS_CHUNK_SIZE			65536
 
 #define APFS_DECMPFS_RAW_ATTRIBUTE		1	// uncompressed, in the attribute
 #define APFS_DECMPFS_ZLIB_ATTRIBUTE		3	// zlib; 0xff first = stored raw
-#define APFS_DECMPFS_ZLIB_FORK			4	// zlib in a classic fork (refused)
+#define APFS_DECMPFS_ZLIB_FORK			4	// zlib chunks, classic fork
 #define APFS_DECMPFS_LZVN_ATTRIBUTE		7	// LZVN; 0x06 first = stored raw
 #define APFS_DECMPFS_LZVN_FORK			8	// LZVN chunks, offset table
 #define APFS_DECMPFS_LZFSE_ATTRIBUTE	11	// LZFSE
@@ -57,6 +64,8 @@ public:
 private:
 			status_t			_PrepareBuffers();
 			status_t			_LoadOffsets();
+			status_t			_LoadOffsetTable(uint32 count);
+			status_t			_LoadClassicFork(uint32 count);
 			status_t			_LoadChunk(uint32 index);
 			status_t			_Decode(const uint8* input, size_t inputLength,
 									uint8* output, size_t outputLength);
@@ -84,9 +93,10 @@ private:
 			uint8*				fHeaderData;
 			size_t				fHeaderSize;
 			bool				fHeaderAllocated;
-			// The resource fork attribute and its offset table.
+			// The resource fork attribute, and where each chunk is in it.
 			apfs_attribute*		fFork;
-			uint32*				fOffsets;
+			uint32*				fChunkOffsets;
+			uint32*				fChunkSizes;
 
 			// The chunk decoded last, the compressed input, the LZFSE
 			// decoder's work space.

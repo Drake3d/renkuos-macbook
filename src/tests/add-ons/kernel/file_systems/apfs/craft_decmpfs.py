@@ -8,8 +8,9 @@ usage: craft_decmpfs.py <type> <input> <output>
 types: 1 (raw in xattr), 3 (zlib in xattr), 30 (type 3 stored raw),
        7 (LZVN in xattr), 70 (type 7 stored raw), 80 (type 8 with a raw
        chunk), 11 (LZFSE in xattr), 12 (LZFSE in resource fork),
-       4 (zlib in a classic resource fork: macOS refuses these files, the
-       layout is not confirmed)
+       4 (zlib in a classic resource fork: macOS refuses these hand-built
+       files, though the chunk table matches real ones; for real type 4
+       files copy an App Store app with ditto --preserveHFSCompression)
 LZVN needs the lzvn_enc helper (lzvn_enc.c) built next to this script as
 tools/lzvn_enc; LZFSE uses macOS's compression_tool.
 """
