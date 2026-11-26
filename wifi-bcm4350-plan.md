@@ -16,8 +16,14 @@ brcmf_pcie_data.cpp (255 RX buffers, one flow ring, TX copy buffers).
 Joined a WPA2-PSK/CCMP network with the host supplicant (wpa_supplicant),
 keys installed, DHCP address, ping 12-32 ms, 0% loss. "ifconfig list"
 was empty because nothing had started a scan ("ifconfig scan" not tried
-yet). Open: scan check, flow ring not reopened on a new network, all
-traffic at priority 0.
+yet).
+Open items fixed and tested 2026-11-26, committed as c263cd2c11: flow ring per
+FIFO from the IP precedence; flow rings deleted on link down and
+reopened by the next frame; SSID-only scans no longer prune the list;
+SDIO chip code moved onto brcmf_chip.cpp (CM3/SOCRAM added there;
+compile-checked only, no Pi). Scan listed 18 networks, list kept them;
+"leave" dropped the link, net_server rejoined after 13 s on another
+access point of the same mesh (6a:d2:ff:93:d0:62), keys, DHCP, ping OK.
 
 ## Hardware (from the MacBook syslog)
 - Built-in card: Broadcom **BCM4350** 802.11ac, PCI `14e4:43a3`, revision 05,

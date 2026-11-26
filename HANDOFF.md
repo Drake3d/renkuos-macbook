@@ -10,8 +10,8 @@ camera work and the built-in Wi-Fi).
 - Code: github.com/Drake3d/renkuos-macbook.
   - `wifi` (work here): `apfs` plus 3 camera commits (settings kept across
     restarts, idle power-down, picture sizes/mirror/CodyCam settings) and
-    2 Wi-Fi commits. Tip: `10961cdba7` "brcmfmac: PCIe data path; the
-    BCM4350 joins networks". Pushed 2026-11-26.
+    3 Wi-Fi commits. Tip: `c263cd2c11` "brcmfmac: flow rings per
+    priority, closed on link down; shared chip code". Pushed 2026-11-26.
   - `apfs`: `apple-spi-input` plus the APFS driver, milestones 1-5
     (`personal/apfs` tip `8d6d75b8a4`). The 3 camera commits sit on the
     local `apfs` too but were pushed only as part of `wifi`.
@@ -158,11 +158,14 @@ Build, test the nightly on the MacBook, then commit the merge.
   attributes, compressed files (LZVN, LZFSE, zlib), programs run from
   APFS, free space as macOS reports it; package `apfs.hpkg` (optional
   image package APFS). Tested on images and on two 4 TB macOS SSDs.
-- Built-in Wi-Fi, BCM4350 (branch `wifi`, 2 commits; see
+- Built-in Wi-Fi, BCM4350 (branch `wifi`, 3 commits; see
   wifi-bcm4350-plan.md): the brcmfmac driver gained a PCIe side (firmware
-  start, msgbuf rings on MSI, data path) under its existing Wi-Fi logic.
-  Joined a WPA2 network, DHCP, ping with no loss. Package
-  `broadcom_wifi.hpkg` (optional image package BroadcomWifi).
+  start, msgbuf rings on MSI, data path with a flow ring per priority)
+  under its existing Wi-Fi logic, and both buses now share the chip code
+  (brcmf_chip.cpp). Scans, joins WPA2 networks, DHCP, ping with no loss;
+  leaving, dropped links and moving to another access point all
+  reconnect. Package `broadcom_wifi.hpkg` (optional image package
+  BroadcomWifi).
 
 ## Camera: files the user must supply
 
@@ -190,10 +193,10 @@ them.
 
 ## Open items
 
-1. Wi-Fi: check scanning (`ifconfig /dev/net/brcmfmac/0 scan`, then
-   `list`, or Network preferences); reopen the flow ring after joining
-   another network; TX priorities (all at 0 today); build for arm64 and
-   move the SDIO chip code onto brcmf_chip.cpp.
+1. Wi-Fi: build for arm64 and test on a Raspberry Pi 4/400 (the SDIO
+   side now uses brcmf_chip.cpp; compile-checked on x86_64 only, as there
+   is no arm64 toolchain and too little disk here to build one). Not
+   tried yet: 5 GHz networks, Network preferences, long downloads, sleep.
 2. APFS: on 2026-11-26 reading compressed files on comp.dmg gave
    "Operation not supported" (attributes listed fine) though milestone 4
    passed; check which apfs.hpkg that boot had and look at its syslog.
