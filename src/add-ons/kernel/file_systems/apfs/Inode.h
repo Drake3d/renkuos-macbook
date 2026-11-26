@@ -168,9 +168,10 @@ public:
 			void				Unget() { fPending = fHaveLast; }
 			status_t			Rewind();
 
-			// Finds an entry by name: exactly, or ignoring ASCII case on a
-			// case-insensitive volume. ASCII names use the name hash; other
-			// names are found by scanning the directory.
+			// Finds an entry by name as macOS compares names: by canonical
+			// decomposition (NFD), and on a case-insensitive volume after
+			// Unicode case folding; through the name hash on volumes that
+			// have one.
 			status_t			Lookup(const char* name, ino_t* _id);
 
 private:
