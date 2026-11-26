@@ -1,0 +1,54 @@
+Existing RenkuOS files changed by our work
+==========================================
+
+Branch `wifi` at e707a92fb1, compared with RenkuOS main at 7b0177e735
+(the merge base). Lines are added / removed. Every other file of ours is
+new. Regenerate with:
+  git diff --numstat --diff-filter=M $(git merge-base wifi origin/main) wifi
+
+Build registration only (one SubInclude line per new folder, package lists)
+---------------------------------------------------------------------------
+  +4  -0    build/jam/HaikuPackages            (APFS, AppleSPIInput,
+                                                BroadcomWifi, FaceTimeHD)
+ +38  -0    build/jam/OptionalPackages         (the same four, optional
+                                                image packages)
+  +1  -0    src/add-ons/input_server/filters/Jamfile     (media_keys)
+  +1  -0    src/add-ons/kernel/bus_managers/Jamfile      (spi)
+  +1  -0    src/add-ons/kernel/busses/Jamfile            (spi)
+  +1  -0    src/add-ons/kernel/drivers/input/Jamfile     (apple_spi)
+  +1  -0    src/add-ons/kernel/drivers/video/Jamfile     (facetimehd)
+  +1  -0    src/add-ons/kernel/file_systems/Jamfile      (apfs)
+  +1  -0    src/add-ons/media/media-add-ons/Jamfile      (facetimehd)
+  +1  -0    src/bin/Jamfile                              (facetimehd_capture)
+  +1  -0    src/preferences/Jamfile                      (camera)
+  +1  -0    src/tests/add-ons/kernel/file_systems/Jamfile (apfs)
+
+CS8409 sound (MacBookPro14,1 speakers, headphones, microphones)
+---------------------------------------------------------------
+  +1  -0    src/add-ons/kernel/drivers/audio/hda/Jamfile  (hda_cs8409.cpp)
+ +26  -0    src/add-ons/kernel/drivers/audio/hda/hda_codec.cpp
+                (codec set-up hook, which widgets go into the streams)
+ +12  -2    src/add-ons/kernel/drivers/audio/hda/hda_multi_audio.cpp
+                (4-channel playback, start/stop hooks)
+  New: hda_cs8409.cpp, hda_cs8409.h
+
+BCM4350 PCIe Wi-Fi (existing brcmfmac driver, SDIO before)
+----------------------------------------------------------
+  +4  -0    src/add-ons/kernel/drivers/network/wlan/brcmfmac/Jamfile
++157 -423   src/add-ons/kernel/drivers/network/wlan/brcmfmac/brcmf.cpp
+                (chip code moved to brcmf_chip.cpp; transport hooks,
+                link rate and signal)
+ +30 -33    src/add-ons/kernel/drivers/network/wlan/brcmfmac/brcmfmac.h
++105  -2    src/add-ons/kernel/drivers/network/wlan/brcmfmac/driver.cpp
+                (PCI probe of 14e4:43a3, link state)
+  New: brcmf_chip.*, brcmf_pcie.*, brcmf_pcie_data.cpp,
+       brcmf_pcie_msgbuf.cpp, brcmf_pcie_regs.h, brcmf_transport.h
+
+Kaby Lake brightness (intel_extreme)
+------------------------------------
+  +5  -0    src/add-ons/accelerants/intel_extreme/mode.cpp
+  +2  -2    src/add-ons/kernel/drivers/graphics/intel_extreme/driver.cpp
+
+EFI start-up fix
+----------------
+ +11  -0    src/system/boot/platform/efi/arch/x86_64/arch_start.cpp

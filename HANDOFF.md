@@ -205,6 +205,32 @@ Build, test the nightly on the MacBook, then commit the merge.
   reconnect; 5 GHz at 400 Mbit/s; real link rate and signal in ifconfig.
   Package `broadcom_wifi.hpkg` (optional image package BroadcomWifi).
 
+## Standalone drivers and edits to RenkuOS code
+
+Compared with RenkuOS main `7b0177e735` (the `wifi` merge base). Three
+drivers are standalone: only new folders, plus the build registration (one
+`SubInclude` line in the parent `Jamfile`, `HaikuPackages`,
+`OptionalPackages`). They can go into any RenkuOS tree by copying their
+folders and adding those lines.
+
+| Driver | Package | New code |
+|---|---|---|
+| APFS (read-only) | `apfs.hpkg` | `file_systems/apfs/` (with LZFSE), test shell and image scripts in `src/tests/` |
+| Apple SPI keyboard and trackpad | `apple_spi_input.hpkg` | `bus_managers/spi/`, `busses/spi/pch/`, `drivers/input/apple_spi/`, `input_server/filters/media_keys/`, `headers/private/spi/spi.h` |
+| FaceTime HD camera | `facetimehd.hpkg` | `drivers/video/facetimehd/`, media add-on, Camera preferences, `facetimehd_capture` |
+
+These changed existing RenkuOS code, so they must be merged into each
+tree's version of those files:
+
+| Change | Existing files edited |
+|---|---|
+| CS8409 sound | `hda_codec.cpp`, `hda_multi_audio.cpp`, `hda` `Jamfile` (new `hda_cs8409.*` holds most of it) |
+| BCM4350 Wi-Fi | `brcmfmac` `brcmf.cpp`, `brcmfmac.h`, `driver.cpp`, `Jamfile` (PCIe side in new files) |
+| Kaby Lake brightness | `intel_extreme` `mode.cpp` and the graphics `driver.cpp` |
+| EFI start-up fix | `boot/platform/efi/arch/x86_64/arch_start.cpp` |
+
+Every edited file, with line counts: changed-files.txt.
+
 ## Camera: files the user must supply
 
 Both go in `/boot/system/non-packaged/data/firmware/facetimehd/` on the
@@ -265,6 +291,8 @@ them.
 - camera-facetimehd-design.md: camera hardware, sources, phase results.
 - sound-cs8409-design.md: CS8409 audio design and provenance.
 - wifi-bcm4350-plan.md: Wi-Fi plan and the result of each phase.
+- changed-files.txt: every existing RenkuOS file we changed, with line
+  counts, grouped by feature.
 - codycam-settings-plan.md: shelved plan for CodyCam's settings window.
 - apfs-readonly-design.md: APFS driver design, results, and the places
   where real volumes differ from Apple's reference.
