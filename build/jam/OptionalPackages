@@ -8,6 +8,7 @@
 #	Development				- more complete dev environment (including autotools)
 #	DevelopmentBase			- basic development environment (gcc, headers, libs,...)
 #	DevelopmentMin			- development headers, libs, tools, from sources only
+#	APFS					- read-only Apple File System (APFS) driver
 #	FaceTimeHD				- FaceTime HD camera of the 2015-2017 MacBook Pro
 #	Git						- the distributed version control system
 #	WebPositive				- native, WebKit-based web browser
@@ -157,6 +158,13 @@ if [ IsOptionalHaikuImagePackageAdded AppleSPIInput ] {
 		AddPackageFilesToHaikuImage system packages : apple_spi_input.hpkg
 			: nameFromMetaInfo ;
 	}
+}
+
+
+# APFS
+if [ IsOptionalHaikuImagePackageAdded APFS ] {
+	AddPackageFilesToHaikuImage system packages : apfs.hpkg
+		: nameFromMetaInfo ;
 }
 
 

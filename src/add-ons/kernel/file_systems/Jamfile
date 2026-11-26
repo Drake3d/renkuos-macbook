@@ -1,5 +1,6 @@
 SubDir HAIKU_TOP src add-ons kernel file_systems ;
 
+SubInclude HAIKU_TOP src add-ons kernel file_systems apfs ;
 SubInclude HAIKU_TOP src add-ons kernel file_systems bfs ;
 SubInclude HAIKU_TOP src add-ons kernel file_systems bfs_big ;
 SubInclude HAIKU_TOP src add-ons kernel file_systems bindfs ;

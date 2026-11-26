@@ -1,0 +1,9 @@
+# Read-only Apple File System (APFS) driver, as a package of its own. It
+# needs no change to the kernel, so it can be installed on a stock system.
+
+local apfsPackage = apfs.hpkg ;
+HaikuPackage $(apfsPackage) ;
+
+AddFilesToPackage add-ons kernel file_systems : apfs ;
+
+BuildHaikuPackage $(apfsPackage) : apfs ;

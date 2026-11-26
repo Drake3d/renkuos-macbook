@@ -1,0 +1,10 @@
+Apple LZFSE and LZVN decoders, imported unmodified for the APFS driver
+(compressed files, decmpfs types 7, 8, 11 and 12).
+
+Source:  https://github.com/lzfse/lzfse
+Commit:  e634ca58b4821d9f3d560cdc6df5dec02ffc93fd (2017-05-22)
+License: BSD-3-Clause, Copyright (c) 2015-2016 Apple Inc.; see LICENSE.
+
+Only the decoding files are included. They are built as C with NDEBUG
+(their assert() checks are compiled out) and are always given a scratch
+buffer, so lzfse_decode_buffer() never allocates.

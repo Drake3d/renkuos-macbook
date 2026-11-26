@@ -1,0 +1,28 @@
+name			apfs
+version			%HAIKU_VERSION%
+architecture	%HAIKU_PACKAGING_ARCH%
+summary			"Read-only Apple File System (APFS) driver"
+
+description		"Mounts APFS volumes made by macOS read-only: files, folders, \
+symlinks, extended attributes and compressed files (LZVN, LZFSE, zlib). \
+Encrypted (FileVault) volumes are not supported."
+
+packager		"The Haiku build system"
+vendor			"RenkuOS"
+
+copyrights		{
+	"2026 RenkuOS Contributors"
+	"2015-2016 Apple Inc. (LZFSE/LZVN decoder)"
+}
+licenses		{
+	"MIT"
+	"BSD (3-clause)"
+}
+
+provides {
+	apfs = %HAIKU_VERSION%
+}
+
+requires {
+	haiku
+}
