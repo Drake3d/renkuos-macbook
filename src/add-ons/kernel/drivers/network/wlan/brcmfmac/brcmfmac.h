@@ -38,6 +38,8 @@
 #include <net_buffer.h>
 #include <util/AutoLock.h>
 
+#include "brcmf_transport.h"
+
 
 //#define TRACE_BRCMFMAC
 #ifdef TRACE_BRCMFMAC
@@ -171,10 +173,14 @@ struct brcmf_scan_entry {
 #define BRCMF_BUFFER_SIZE		(64 * 1024)
 
 
-class Brcmf {
+class Brcmf : public BrcmfReceiver {
 public:
-								Brcmf(SdioHost* host);
-								~Brcmf();
+								Brcmf(SdioHost* host,
+									BrcmfTransport* transport = NULL);
+									// SDIO: a host and no transport; other
+									// buses: a transport, whose firmware
+									// is already running
+	virtual						~Brcmf();
 
 			// bring up
 			status_t			Probe();
@@ -226,6 +232,12 @@ public:
 			void				SetDeviceName(const char* name);
 			void				SetPromiscuous(bool enable);
 			void				InterruptReceived();
+
+	// BrcmfReceiver, for a transport
+	virtual	void				ReceiveEvent(const uint8* data,
+									size_t length);
+	virtual	void				ReceiveData(const uint8* data,
+									size_t length);
 
 private:
 			// backplane access
@@ -297,6 +309,7 @@ private:
 
 private:
 			SdioHost*			fHost;
+			BrcmfTransport*		fTransport;
 			mutex				fBusLock;
 			mutex				fStateLock;
 			mutex				fCommandLock;

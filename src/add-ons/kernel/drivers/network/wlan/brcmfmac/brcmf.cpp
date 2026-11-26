@@ -340,9 +340,10 @@ static net_notifications_module_info* sNotificationModule;
 // #pragma mark - Brcmf
 
 
-Brcmf::Brcmf(SdioHost* host)
+Brcmf::Brcmf(SdioHost* host, BrcmfTransport* transport)
 	:
 	fHost(host),
+	fTransport(transport),
 	fWindow(0xffffffff),
 	fChip(0),
 	fChipRev(0),
@@ -1048,6 +1049,12 @@ Brcmf::Probe()
 		return B_NO_MEMORY;
 	}
 
+	if (fTransport != NULL) {
+		// the bus brought the chip and its firmware up
+		fProbed = true;
+		return B_OK;
+	}
+
 	MutexLocker locker(fBusLock);
 
 	status_t status = _SdioInit();
@@ -1325,6 +1332,16 @@ Brcmf::Start()
 	if (!fProbed)
 		return B_NO_INIT;
 
+	if (fTransport != NULL) {
+		status_t status = _InitFirmware();
+		if (status != B_OK) {
+			ERROR("firmware initialization failed: %s\n", strerror(status));
+			return status;
+		}
+		fRunning = true;
+		return B_OK;
+	}
+
 	{
 		MutexLocker locker(fBusLock);
 
@@ -1395,6 +1412,11 @@ Brcmf::Start()
 void
 Brcmf::Stop()
 {
+	if (fTransport != NULL) {
+		fRunning = false;
+		return;
+	}
+
 	if (fReaderThread >= 0) {
 		fStopReader = true;
 		release_sem(fInterruptSem);
@@ -1673,6 +1695,20 @@ Brcmf::_HandleData(uint8* data, size_t length)
 }
 
 
+void
+Brcmf::ReceiveEvent(const uint8* data, size_t length)
+{
+	_HandleEvent(const_cast<uint8*>(data), length);
+}
+
+
+void
+Brcmf::ReceiveData(const uint8* data, size_t length)
+{
+	_HandleData(const_cast<uint8*>(data), length);
+}
+
+
 status_t
 Brcmf::Receive(net_buffer** _buffer, bool block)
 {
@@ -1730,6 +1766,9 @@ Brcmf::Send(net_buffer* buffer)
 	if (buffer->size > 1600)
 		return B_BAD_VALUE;
 
+	if (fTransport != NULL)
+		return fTransport->TransportSend(buffer);
+
 	// wait for the firmware to accept more frames
 	bigtime_t timeout = system_time() + 500000;
 	while (!_TxWindowOpen()) {
@@ -1768,6 +1807,10 @@ Brcmf::_Dcmd(uint32 command, bool set, void* data, size_t length,
 {
 	if (length > kMaxDcmdPayload)
 		return B_BAD_VALUE;
+	if (fTransport != NULL) {
+		return fTransport->TransportDcmd(command, set, data, length,
+			_replyLength);
+	}
 	if (fReaderThread < 0)
 		return B_NO_INIT;
 

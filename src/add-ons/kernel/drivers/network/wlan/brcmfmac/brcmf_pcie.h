@@ -27,7 +27,8 @@
  * started, and the shared memory area the firmware sets up is read.
  * Phase 2 (brcmf_pcie_msgbuf.cpp): the msgbuf rings in host memory, the
  * interrupt, and firmware commands (dcmds/iovars) over the control rings.
- * The data path (flow rings, RX buffers) comes next.
+ * Phase 3 (brcmf_pcie_data.cpp): RX buffers, a TX flow ring, and the link
+ * to the Wi-Fi logic in Brcmf through BrcmfTransport.
  */
 #ifndef BRCMF_PCIE_H
 #define BRCMF_PCIE_H
@@ -40,6 +41,7 @@
 #include <lock.h>
 
 #include "brcmf_chip.h"
+#include "brcmf_transport.h"
 
 
 struct brcmf_dma_buffer {
@@ -68,8 +70,31 @@ struct brcmf_msgring {
 #define BRCMF_PCIE_CONTROL_BUFFERS \
 	(BRCMF_PCIE_IOCTL_BUFFERS + BRCMF_PCIE_EVENT_BUFFERS)
 
+// Frame buffers, in physically contiguous chunks
+#define BRCMF_PCIE_FRAME_SIZE		2048
+#define BRCMF_PCIE_FRAMES_PER_CHUNK	32
+#define BRCMF_PCIE_FRAME_CHUNKS		8
+#define BRCMF_PCIE_FRAMES \
+	(BRCMF_PCIE_FRAMES_PER_CHUNK * BRCMF_PCIE_FRAME_CHUNKS)
 
-class BrcmfPcie : public BrcmfBackplane {
+
+struct brcmf_frame_pool {
+	brcmf_dma_buffer chunks[BRCMF_PCIE_FRAME_CHUNKS];
+	bool		busy[BRCMF_PCIE_FRAMES];
+	int32		busyCount;
+
+	uint8*		Data(int32 index)
+					{ return chunks[index / BRCMF_PCIE_FRAMES_PER_CHUNK].data
+						+ (index % BRCMF_PCIE_FRAMES_PER_CHUNK)
+							* BRCMF_PCIE_FRAME_SIZE; }
+	phys_addr_t	Physical(int32 index)
+					{ return chunks[index / BRCMF_PCIE_FRAMES_PER_CHUNK]
+						.physical + (index % BRCMF_PCIE_FRAMES_PER_CHUNK)
+							* BRCMF_PCIE_FRAME_SIZE; }
+};
+
+
+class BrcmfPcie : public BrcmfBackplane, public BrcmfTransport {
 public:
 								BrcmfPcie(pci_device_module_info* pci,
 									pci_device* device);
@@ -84,6 +109,15 @@ public:
 									size_t* _length);
 			status_t			GetVar(const char* name, void* data,
 									size_t length);
+
+			void				SetReceiver(BrcmfReceiver* receiver)
+									{ fReceiver = receiver; }
+
+	// BrcmfTransport
+	virtual	status_t			TransportDcmd(uint32 command, bool set,
+									void* data, size_t length,
+									size_t* _replyLength);
+	virtual	status_t			TransportSend(net_buffer* buffer);
 
 	// BrcmfBackplane
 	virtual	uint32				Read4(uint32 address);
@@ -146,6 +180,19 @@ private:
 			void				_ServiceLoop();
 			void				_HandleMailboxData();
 			void				_QueryFirmware();
+
+			// data path (brcmf_pcie_data.cpp)
+			status_t			_AllocFramePool(brcmf_frame_pool& pool,
+									const char* name);
+			void				_FreeFramePool(brcmf_frame_pool& pool);
+			status_t			_SetupData();
+			void				_FreeData();
+			void				_PostRxBuffers();
+			void				_HandleRxComplete(const uint8* message);
+			void				_HandleTxStatus(const uint8* message);
+			void				_HandleFlowRingCreated(const uint8* message);
+			status_t			_OpenFlowRing(const uint8* destination,
+									const uint8* source);
 
 private:
 			pci_device_module_info* fPci;
@@ -214,6 +261,22 @@ private:
 			int32				fInterruptCount;
 			int32				fPolledMessages;
 			int32				fEventCount;
+			uint32				fH2DWriteBase;
+			uint32				fH2DReadBase;
+
+			// data path
+			BrcmfReceiver*		fReceiver;
+			brcmf_frame_pool	fRxPool;
+			brcmf_frame_pool	fTxPool;
+			brcmf_msgring		fFlowRing;
+			int32				fFlowState;
+			uint16				fFlowStatus;
+			ConditionVariable	fFlowCondition;
+			mutex				fTxLock;
+			ConditionVariable	fTxCondition;
+			int32				fRxFrames;
+			int32				fTxFrames;
+			int32				fTxFailed;
 };
 
 

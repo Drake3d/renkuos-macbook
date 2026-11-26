@@ -432,12 +432,29 @@ BrcmfPcie::_HandleMessage(const uint8* message)
 				ERROR("event in unknown buffer %" B_PRIu32 "\n", index);
 				break;
 			}
-			// Events are handled in phase 4; for now they are counted.
 			fEventCount++;
+			size_t length = min_c((size_t)event->length,
+				kControlBufferSize - fRxDataOffset);
+			if (fReceiver != NULL) {
+				fReceiver->ReceiveEvent(fControlBuffers[index].data
+					+ fRxDataOffset, length);
+			}
 			MutexLocker locker(fRingLock);
 			fControlPosted[index] = false;
 			break;
 		}
+
+		case MSGBUF_TYPE_RX_CMPLT:
+			_HandleRxComplete(message);
+			break;
+
+		case MSGBUF_TYPE_TX_STATUS:
+			_HandleTxStatus(message);
+			break;
+
+		case MSGBUF_TYPE_FLOW_RING_CREATE_CMPLT:
+			_HandleFlowRingCreated(message);
+			break;
 
 		case MSGBUF_TYPE_D2H_MAILBOX_DATA:
 		{
@@ -542,13 +559,15 @@ BrcmfPcie::_ServiceLoop()
 		}
 
 		int32 handled = _RingProcess(fControlComplete);
-		_RingProcess(fTxComplete);
-		_RingProcess(fRxComplete);
-		if (handled > 0) {
+		if (handled > 0)
 			_PostControlBuffers();
-			if (!interrupted)
-				atomic_add(&fPolledMessages, handled);
-		}
+		handled += _RingProcess(fTxComplete);
+		int32 received = _RingProcess(fRxComplete);
+		if (received > 0)
+			_PostRxBuffers();
+		handled += received;
+		if (handled > 0 && !interrupted)
+			atomic_add(&fPolledMessages, handled);
 
 		if (interrupted)
 			_EnableInterrupts(true);
@@ -670,6 +689,8 @@ BrcmfPcie::_SetupMsgbuf()
 	uint32 h2dRead = _TcmRead4(ringInfo + RINGINFO_H2D_R_IDX_PTR);
 	uint32 d2hWrite = _TcmRead4(ringInfo + RINGINFO_D2H_W_IDX_PTR);
 	uint32 d2hRead = _TcmRead4(ringInfo + RINGINFO_D2H_R_IDX_PTR);
+	fH2DWriteBase = h2dWrite;
+	fH2DReadBase = h2dRead;
 	if (fSharedVersion >= 6) {
 		fMaxSubmissionRings = _TcmRead2(ringInfo + RINGINFO_MAX_SUBMISSION);
 		fMaxFlowRings = _TcmRead2(ringInfo + RINGINFO_MAX_FLOWRINGS);
@@ -769,6 +790,10 @@ BrcmfPcie::_SetupMsgbuf()
 
 	_PostControlBuffers();
 	INFO("msgbuf rings set up\n");
+
+	status = _SetupData();
+	if (status != B_OK)
+		return status;
 	return B_OK;
 }
 
@@ -777,6 +802,7 @@ void
 BrcmfPcie::_FreeMsgbuf()
 {
 	fMsgbufReady = false;
+	_FreeData();
 	_FreeDma(fControlSubmit.memory);
 	_FreeDma(fRxPostSubmit.memory);
 	_FreeDma(fControlComplete.memory);
@@ -883,6 +909,30 @@ BrcmfPcie::GetVar(const char* name, void* data, size_t length)
 	status_t status = Dcmd(kDcmdGetVar, false, buffer, &replyLength);
 	if (status == B_OK)
 		memcpy(data, buffer, min_c(length, replyLength));
+	free(buffer);
+	return status;
+}
+
+
+status_t
+BrcmfPcie::TransportDcmd(uint32 command, bool set, void* data, size_t length,
+	size_t* _replyLength)
+{
+	// Dcmd() always copies the reply back; a set must not see it.
+	uint8* buffer = (uint8*)malloc(max_c(length, (size_t)4));
+	if (buffer == NULL)
+		return B_NO_MEMORY;
+	if (data != NULL && length > 0)
+		memcpy(buffer, data, length);
+	else
+		memset(buffer, 0, max_c(length, (size_t)4));
+
+	size_t replyLength = length;
+	status_t status = Dcmd(command, set, buffer, &replyLength);
+	if (status == B_OK && !set && data != NULL)
+		memcpy(data, buffer, min_c(length, replyLength));
+	if (_replyLength != NULL)
+		*_replyLength = status == B_OK ? replyLength : 0;
 	free(buffer);
 	return status;
 }

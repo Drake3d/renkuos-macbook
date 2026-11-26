@@ -11,6 +11,7 @@ KernelAddon brcmfmac :
 	brcmf.cpp
 	brcmf_chip.cpp
 	brcmf_pcie.cpp
+	brcmf_pcie_data.cpp
 	brcmf_pcie_msgbuf.cpp
 	driver.cpp
 	sdio_host.cpp

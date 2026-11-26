@@ -12,8 +12,8 @@
  * described in brcmf.cpp, together with the acknowledgements.
  *
  * Two buses: SDIO on the Raspberry Pi 4/400 (ACPI device "BCM2847"), and
- * PCIe (brcmf_pcie.cpp). On PCIe only the firmware bring-up is done so far;
- * no network device is published there yet.
+ * PCIe (brcmf_pcie*.cpp), whose msgbuf protocol carries the same Wi-Fi
+ * logic (Brcmf) through BrcmfTransport.
  */
 
 
@@ -694,6 +694,9 @@ brcmf_free_info(brcmf_info* info)
 {
 	if (info->irq != 0 && info->host != NULL)
 		remove_io_interrupt_handler(info->irq, brcmf_interrupt, info);
+	// The PCIe service thread calls into Brcmf; stop it first.
+	if (info->pcie != NULL)
+		info->pcie->Stop();
 	delete info->brcmf;
 	delete info->host;
 	delete info->pcie;
@@ -722,9 +725,16 @@ brcmf_init_pci(brcmf_info* info)
 	status_t status = info->pcie->Init();
 	if (status == B_OK)
 		status = info->pcie->Start();
-	if (status != B_OK)
+	if (status != B_OK) {
 		ERROR("PCIe bring-up failed: %s\n", strerror(status));
-	return status;
+		return status;
+	}
+
+	info->brcmf = new(std::nothrow) Brcmf(NULL, info->pcie);
+	if (info->brcmf == NULL)
+		return B_NO_MEMORY;
+	info->pcie->SetReceiver(info->brcmf);
+	return info->brcmf->Probe();
 }
 
 
@@ -853,11 +863,6 @@ static status_t
 brcmf_register_child_devices(void* _cookie)
 {
 	brcmf_info* info = (brcmf_info*)_cookie;
-
-	// The PCIe side has no control or data path yet, so there is no
-	// network device to publish.
-	if (info->pcie != NULL)
-		return B_OK;
 
 	int32 id = sDeviceManager->create_id(BRCMF_DEVICE_ID_GENERATOR);
 	if (id < 0)

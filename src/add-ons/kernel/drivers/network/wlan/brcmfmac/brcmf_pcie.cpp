@@ -189,7 +189,15 @@ BrcmfPcie::BrcmfPcie(pci_device_module_info* pci, pci_device* device)
 	fPendingStatus(0),
 	fInterruptCount(0),
 	fPolledMessages(0),
-	fEventCount(0)
+	fEventCount(0),
+	fH2DWriteBase(0),
+	fH2DReadBase(0),
+	fReceiver(NULL),
+	fFlowState(0),
+	fFlowStatus(0),
+	fRxFrames(0),
+	fTxFrames(0),
+	fTxFailed(0)
 {
 	memset(&fInfo, 0, sizeof(fInfo));
 
@@ -201,6 +209,14 @@ BrcmfPcie::BrcmfPcie(pci_device_module_info* pci, pci_device* device)
 		rings[i]->memory = empty;
 	}
 	fScratch = fRingUpdate = fIoctlRequest = empty;
+	memset(&fFlowRing, 0, sizeof(fFlowRing));
+	fFlowRing.memory = empty;
+	brcmf_frame_pool* pools[] = { &fRxPool, &fTxPool };
+	for (size_t i = 0; i < B_COUNT_OF(pools); i++) {
+		memset(pools[i], 0, sizeof(brcmf_frame_pool));
+		for (int j = 0; j < BRCMF_PCIE_FRAME_CHUNKS; j++)
+			pools[i]->chunks[j] = empty;
+	}
 	for (int i = 0; i < BRCMF_PCIE_CONTROL_BUFFERS; i++) {
 		fControlBuffers[i] = empty;
 		fControlPosted[i] = false;
@@ -209,6 +225,9 @@ BrcmfPcie::BrcmfPcie(pci_device_module_info* pci, pci_device* device)
 	mutex_init(&fRingLock, "brcmfmac pcie rings");
 	mutex_init(&fIoctlLock, "brcmfmac pcie ioctl");
 	fIoctlCondition.Init(this, "brcmfmac ioctl");
+	mutex_init(&fTxLock, "brcmfmac pcie tx");
+	fTxCondition.Init(&fTxPool, "brcmfmac tx");
+	fFlowCondition.Init(&fFlowRing, "brcmfmac flow ring");
 }
 
 
@@ -217,6 +236,7 @@ BrcmfPcie::~BrcmfPcie()
 	Stop();
 	mutex_destroy(&fRingLock);
 	mutex_destroy(&fIoctlLock);
+	mutex_destroy(&fTxLock);
 	if (fRegArea >= 0)
 		delete_area(fRegArea);
 	if (fTcmArea >= 0)
