@@ -142,9 +142,14 @@ static uint32 sLevelLogs;
 
 // The microphones are quiet, as in macOS [D]. Pin 0x44 can boost them by
 // 10 or 20 dB; "apple_mic_boost <dB>" in hda.settings changes it. The
-// recording gain of converter 0x22 is in the media preferences' mixer.
+// recording gain of converter 0x22 is in the media preferences' mixer; it
+// starts at kDefaultMicGain dB (or the most the converter has) instead of
+// 0 dB, and "apple_mic_gain <dB>" changes that. Once the mixer's gain has
+// been saved, the media server sets the saved one again at start-up.
 static const uint8 kDefaultMicBoost = 20;
 static uint8 sMicBoost = kDefaultMicBoost;
+static const uint8 kDefaultMicGain = 9;
+static uint8 sMicGain = kDefaultMicGain;
 
 // The headphone jack: a CS42L83 codec on the same I2C bus, fed from the
 // CS8409's second serial port through converter 0x0a [D]. Its registers
@@ -403,6 +408,31 @@ mic_init(hda_codec* codec)
 		CS8409_PAD_CFG_DMIC1_SCL);
 	send_verb(codec, CS8409_PIN_MIC, VID_SET_PIN_WIDGET_CONTROL,
 		PIN_ENABLE_INPUT);
+
+	// The recording gain: the generic code has put converter 0x22 on 0 dB.
+	// Steps are in quarter dB units here; the offset step is 0 dB.
+	uint32 caps = read_verb(codec, CS8409_NODE_MIC,
+		VID_GET_PARAMETER | PID_INPUT_AMPLIFIER_CAP);
+	uint32 offset = AMP_CAP_OFFSET(caps);
+	uint32 steps = AMP_CAP_NUM_STEPS(caps);
+	uint32 quarters = ((caps & AMP_CAP_STEP_SIZE_MASK)
+		>> AMP_CAP_STEP_SIZE_SHIFT) + 1;
+	if (caps == 0 || steps <= offset) {
+		TRACE("microphone: converter gain caps 0x%08" B_PRIx32 ", no gain "
+			"above 0 dB\n", caps);
+		return;
+	}
+	uint32 gain = min_c(offset + (sMicGain * 4 + quarters / 2) / quarters,
+		steps);
+	send_verb(codec, CS8409_NODE_MIC, VID_SET_AMPLIFIER_GAIN_MUTE,
+		AMP_SET_INPUT | AMP_SET_LEFT_CHANNEL | AMP_SET_RIGHT_CHANNEL
+			| AMP_SET_INPUT_INDEX(0) | gain);
+	TRACE("microphone: converter gain %" B_PRId32 " to +%" B_PRIu32
+		" dB in %" B_PRIu32 ".%02" B_PRIu32 " dB steps, set to +%" B_PRIu32
+		".%02" B_PRIu32 " dB\n",
+		-(int32)(offset * quarters / 4), (steps - offset) * quarters / 4,
+		quarters / 4, quarters % 4 * 25, (gain - offset) * quarters / 4,
+		(gain - offset) * quarters % 4 * 25);
 }
 
 
@@ -1018,10 +1048,14 @@ hda_cs8409_init(hda_codec* codec)
 		value = get_driver_parameter(settings, "apple_mic_boost", NULL, NULL);
 		if (value != NULL)
 			sMicBoost = min_c(strtoul(value, NULL, 0), 20) / 10 * 10;
+		value = get_driver_parameter(settings, "apple_mic_gain", NULL, NULL);
+		if (value != NULL)
+			sMicGain = min_c(strtoul(value, NULL, 0), 60);
 		unload_driver_settings(settings);
 	}
 	TRACE("amplifier volume 0x%02x, headphones -%u dB, microphone +%u dB"
-		"%s%s\n", sAmplifierVolume, sHeadphoneAttenuation, sMicBoost,
+		" boost, +%u dB gain%s%s\n", sAmplifierVolume, sHeadphoneAttenuation,
+		sMicBoost, sMicGain,
 		sTestTone ? ", test tone on" : "", sDebug ? ", debug logging" : "");
 
 	// audio function group on, vendor processing on
