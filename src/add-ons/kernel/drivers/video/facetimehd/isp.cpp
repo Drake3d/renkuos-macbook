@@ -644,6 +644,13 @@ find_sensor_power(acpi_handle object, uint32 level, void* context,
 	On the MacBookPro14,1 (\_SB.PCI0.RP05.CMPE) the method takes no
 	argument; ACPICA then drops the one passed and warns about it.
 */
+/*!	Switches the sensor's power rail with the ACPI methods of the camera's
+	PCIe port: CMPE ("camera power enable") to switch it on, CMPD to switch
+	it off. On the MacBookPro14,1 CMPE takes no argument (ACPICA drops the
+	one passed here, with a warning); older models take 1. Without CMPD
+	the rail is left alone when switching off: calling CMPE then would
+	switch it on.
+*/
 static void
 set_sensor_power(bool on)
 {
@@ -672,13 +679,25 @@ set_sensor_power(bool on)
 	}
 	free(path.pointer);
 
+	const char* method = "CMPE";
 	acpi_object_type argument;
 	argument.object_type = ACPI_TYPE_INTEGER;
 	argument.integer.integer = on ? 1 : 0;
 	acpi_objects arguments = { 1, &argument };
-	acpi_data result = { ACPI_ALLOCATE_BUFFER, NULL };
+	acpi_objects* passed = &arguments;
 
-	status_t status = sACPI->evaluate_method(camera, "CMPE", &arguments,
+	if (!on) {
+		acpi_handle disable;
+		if (sACPI->get_handle(camera, "CMPD", &disable) != B_OK) {
+			FTHD_LOG("%s has no CMPD; sensor power left on\n", name);
+			return;
+		}
+		method = "CMPD";
+		passed = NULL;
+	}
+
+	acpi_data result = { ACPI_ALLOCATE_BUFFER, NULL };
+	status_t status = sACPI->evaluate_method(camera, method, passed,
 		&result);
 	char value[32] = "nothing";
 	if (status == B_OK && result.pointer != NULL) {
@@ -690,7 +709,7 @@ set_sensor_power(bool on)
 	}
 	free(result.pointer);
 
-	FTHD_LOG("%s.CMPE(%d): %s, returned %s\n", name, on ? 1 : 0,
+	FTHD_LOG("%s.%s(%s): %s, returned %s\n", name, method, on ? "1" : "",
 		strerror(status), value);
 }
 
@@ -985,10 +1004,81 @@ fthd_isp_uninit(fthd_device* device)
 		stop_processor(device);
 		free_channels(device);
 		device->isp_up = false;
+
+		// The sensor's power rail goes off too; everything the firmware had
+		// in S2 MEM went with it.
+		set_sensor_power(false);
+		fthd_memory_free_all(device);
+		device->set_file = 0;
+		atomic_set(&device->shared_allocations, 0);
 	}
 
 	if (sACPI != NULL) {
 		put_module(B_ACPI_MODULE_NAME);
 		sACPI = NULL;
 	}
+}
+
+
+/*!	Undoes a start-up that failed part way, the sensor's power included
+	(fthd_isp_init() turns it on before the processor is known to start).
+*/
+static void
+power_up_cleanup(fthd_device* device)
+{
+	bool wasUp = device->isp_up;
+	fthd_isp_uninit(device);
+	if (!wasUp)
+		set_sensor_power(false);
+	fthd_memory_free_all(device);
+	device->set_file = 0;
+}
+
+
+/*!	Starts the processor and firmware again after fthd_power_down(). The
+	link and the S2 DDR stay set up while the driver is loaded, so only the
+	firmware part of the bring-up is repeated.
+*/
+status_t
+fthd_power_up(fthd_device* device)
+{
+	if (device->isp_up)
+		return B_OK;
+	if (!device->hardware_up)
+		return B_NO_INIT;
+
+	bigtime_t start = system_time();
+	status_t status = fthd_isp_init(device);
+	if (status != B_OK) {
+		// Not known yet whether the firmware always restarts on the DDR
+		// set up at load time: if not, do the whole bring-up again.
+		FTHD_LOG("restarting the firmware failed (%s); full bring-up\n",
+			strerror(status));
+		power_up_cleanup(device);
+		status = fthd_hardware_init(device);
+		if (status == B_OK)
+			status = fthd_isp_init(device);
+	}
+	if (status != B_OK) {
+		FTHD_LOG("powering the camera up failed: %s\n", strerror(status));
+		power_up_cleanup(device);
+		return status;
+	}
+
+	device->last_used = system_time();
+	FTHD_LOG("camera powered up in %" B_PRId64 " ms\n",
+		(system_time() - start) / 1000);
+	return B_OK;
+}
+
+
+void
+fthd_power_down(fthd_device* device)
+{
+	if (!device->isp_up || device->streaming)
+		return;
+
+	fthd_isp_uninit(device);
+	FTHD_LOG("camera powered down after %" B_PRId64 " s unused\n",
+		(system_time() - device->last_used) / 1000000);
 }

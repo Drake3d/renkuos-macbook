@@ -125,6 +125,17 @@ fthd_memory_alloc(fthd_device* device, uint32 size, uint32* _offset)
 }
 
 
+/*!	Forgets every piece, the firmware image included. Only for when the
+	processor is stopped: everything in S2 MEM belonged to that run.
+*/
+void
+fthd_memory_free_all(fthd_device* device)
+{
+	MutexLocker locker(device->memory_lock);
+	device->allocation_count = 0;
+}
+
+
 void
 fthd_memory_free(fthd_device* device, uint32 offset)
 {

@@ -375,6 +375,7 @@ fthd_stream_query_sensor(fthd_device* device)
 
 	// the firmware keeps using it, so it stays
 	device->set_file = offset;
+	device->set_file_seen = true;
 	FTHD_LOG("loaded set file %s, %" B_PRIuSIZE " bytes\n", path, size);
 }
 
@@ -729,10 +730,14 @@ status_t
 fthd_stream_start(fthd_device* device)
 {
 	MutexLocker locker(device->stream_lock);
-	if (!device->isp_up)
-		return B_NO_INIT;
 	if (device->streaming)
 		return B_BUSY;
+
+	// The camera is switched off while unused (see fthd_power_down()).
+	status_t powerStatus = fthd_power_up(device);
+	if (powerStatus != B_OK)
+		return powerStatus;
+	device->last_used = system_time();
 
 	device->frame_size = (device->width * device->height * 2 + B_PAGE_SIZE
 		- 1) & ~(size_t)(B_PAGE_SIZE - 1);
@@ -794,6 +799,7 @@ fthd_stream_stop(fthd_device* device)
 	}
 
 	device->streaming = false;
+	device->last_used = system_time();
 	bigtime_t duration = system_time() - device->stream_start;
 	int32 frames = atomic_get(&device->frames_received);
 	FTHD_LOG("stream stopped: %" B_PRId32 " frames in %" B_PRId64 " ms "
