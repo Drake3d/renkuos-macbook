@@ -13,9 +13,10 @@ camera work and the built-in Wi-Fi).
     4 Wi-Fi commits, then the microphone gain commit (`e707a92fb1`), APFS
     type 4 compression (`9b7dae4981`), APFS Unicode names (`bd51ec5568`)
     the Apple SMC sensor driver (`1df69d3307`), two FAT driver fixes
-    (`c680fd5d2a`) and Bluetooth (5 commits, `eb5a1d7a42`..`f1047b0513`).
-    Tip: `f1047b0513` "bcm_uart: receive on the serial port's interrupt".
-    Pushed 2026-11-26.
+    (`c680fd5d2a`), Bluetooth (5 commits, `eb5a1d7a42`..`f1047b0513`) and
+    Bluetooth in images. Tip: `0a39902965` "build: BroadcomBluetooth as
+    an optional image package". Pushed 2026-11-26. A nightly built from it
+    is installed on the MacBook and everything checked works (2026-11-26).
   - `apfs`: `apple-spi-input` plus the APFS driver, milestones 1-5
     (`personal/apfs` tip `8d6d75b8a4`). The 3 camera commits sit on the
     local `apfs` too but were pushed only as part of `wifi`.
@@ -318,14 +319,7 @@ them.
 3. Camera: sleep and wake (needs system suspend, which RenkuOS lacks).
 4. Speakers sometimes silent until a reboot (seen once): on recurrence,
    try Media preferences > Restart media services and save the syslog.
-5. After the merge, check the input selector (upstream reworked hda mux
-   controls) and display moves on Kaby Lake. The internal microphone
-   records fine on the merged tree (2026-11-26).
-6. The MacBook still runs the test hda from `hda-mic-test` (a copy in
-   non-packaged plus `/boot/system/settings/packages` hiding the haiku
-   package's hda). Run its `uninstall.sh` and reboot when an image with
-   `e707a92fb1` is installed.
-7. APFS: sealed volumes (every macOS 11+ System volume, and the cryptex
+5. APFS: sealed volumes (every macOS 11+ System volume, and the cryptex
    images in Preboot) do not mount: their file-system tree nodes fail the
    checksum check ("bad checksum in block ..."), as sealed trees are
    protected by hashes instead; data volumes are not sealed. FileVault
@@ -334,32 +328,31 @@ them.
    "snapshot=" mount option) is in working/apfs-snapshots-shelved.patch,
    untested: macOS will not create snapshots on disk images, even as root
    (fs_snapshot_create needs an Apple entitlement).
-8. FAT driver (RenkuOS's own code): two panics fixed in `c680fd5d2a`
-   (mkdir of an existing folder; O_TRUNC on a read-only volume or file),
-   tested on the MacBook with the driver from fat-test/ on "NEW FAT VOL"
-   loaded in place of the packaged one (BlockedEntries, like the hda
-   test). Not run there: overwriting on a volume mounted read-only, the
-   exact case of the second panic. The MacBook still runs that test
-   driver: run fat-test/uninstall.sh and reboot once an image with
-   `c680fd5d2a` is installed (it keeps the hda test entries, if any).
-   Images before `c680fd5d2a` still have both panics: do not mkdir -p or
-   overwrite files on FAT drives with them (dragging in Tracker is safe).
-9. Installing a package by copying it into /boot/system/packages can
+6. FAT driver (RenkuOS's own code): the two panics fixed in `c680fd5d2a`
+   were tested on the MacBook except for overwriting a file on a volume
+   mounted read-only, the exact case of the second panic. Images before
+   `c680fd5d2a` still have both panics: do not mkdir -p or overwrite
+   files on FAT drives with them (dragging in Tracker is safe).
+7. Installing a package by copying it into /boot/system/packages can
    fail: the package daemon may read it while it is still being copied
    ("failed to init package for file") and never activates it. Use
    `pkgman install <file>.hpkg` (macbook-drivers/install.sh does).
-10. Bluetooth: not tried yet: a Bluetooth mouse or keyboard
+8. Bluetooth: not tried yet: a Bluetooth mouse or keyboard
    (bluetooth_hid), audio (SCO is not supported by bcm_uart). RenkuOS's
    own gaps seen in the tests: L2CAP does not answer an information
    request for extended features ("unhandled information request type
    2"); the server decodes neither Broadcom's vendor event nor event
    0x3d; a paired phone had to pair again after the test scripts
-   restarted the server (the link key may not be saved). BroadcomBluetooth
-   is not an optional image package yet (only in HaikuPackages), so
-   images do not include it. Until an image with `3eb18cea42` is
-   installed, the preferences need the fixed server (bt-test/check5.sh
-   runs it). Packet tracing is on on the MacBook: delete
-   /boot/home/config/settings/kernel/drivers/bcm_uart to turn it off.
+   restarted the server (the link key may not be saved). bcm_uart.cpp is
+   1210 lines; splitting the serial port code out would read better.
+9. Shelved by choice: picking the trackpad size from the Mac's SMBIOS
+   model (all nine SPI MacBooks mapped to their pads) instead of assuming
+   the 13 inch pad until the pad reports itself; built, not tested;
+   working/trackpad-machine-model.patch.
+
+Done since the merge check list: the input selector and display moves
+work on the merged tree, and the MacBook runs the packaged hda and fat
+again (the test copies are gone with the 2026-11-26 image).
 
 ## Notes in this branch
 
