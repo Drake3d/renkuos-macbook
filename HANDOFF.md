@@ -12,9 +12,10 @@ camera work and the built-in Wi-Fi).
     restarts, idle power-down, picture sizes/mirror/CodyCam settings) and
     4 Wi-Fi commits, then the microphone gain commit (`e707a92fb1`), APFS
     type 4 compression (`9b7dae4981`), APFS Unicode names (`bd51ec5568`)
-    the Apple SMC sensor driver (`1df69d3307`) and two FAT driver fixes.
-    Tip: `c680fd5d2a` "fat: fix two panics, mkdir of an existing folder
-    and truncating read-only". Pushed 2026-11-26.
+    the Apple SMC sensor driver (`1df69d3307`), two FAT driver fixes
+    (`c680fd5d2a`) and Bluetooth (5 commits, `eb5a1d7a42`..`f1047b0513`).
+    Tip: `f1047b0513` "bcm_uart: receive on the serial port's interrupt".
+    Pushed 2026-11-26.
   - `apfs`: `apple-spi-input` plus the APFS driver, milestones 1-5
     (`personal/apfs` tip `8d6d75b8a4`). The 3 camera commits sit on the
     local `apfs` too but were pushed only as part of `wifi`.
@@ -220,14 +221,33 @@ Build, test the nightly on the MacBook, then commit the merge.
 - Hardware survey (2026-11-26, survey/survey.sh on "NEW FAT VOL"): the
   battery, AC adapter, lid, power button (ACPI drivers), ambient light
   sensor (acpi_als) and keyboard backlight (apple_spi) already work.
-  Still missing: Bluetooth (BCM2E7C on the Intel LPSS UART 8086:9d27,
-  needs a UART driver, an H4/H5 transport and Broadcom's firmware patch);
-  sleep (no system suspend). List of planned drivers:
-  planned-drivers.txt on the drive.
+  Bluetooth was missing (now done, below); sleep still is (no system
+  suspend). List of planned drivers: planned-drivers.txt on the drive.
+- Bluetooth (`eb5a1d7a42`, `3eb18cea42`, `a64f268c0d`, `dc95a9440d`,
+  `f1047b0513`): the BCM4350's Bluetooth sits on the Intel LPSS UART
+  URT0 (PCI 8086:9d27) as ACPI BLTH (BCM2E7C), not on USB. New driver
+  `drivers/bluetooth/bcm_uart/`, an H4 transport publishing
+  `/dev/bluetooth/h4/bcm_uart/0` (the server wants a folder per driver
+  below h4). On open: Apple's ACPI methods power the chip (BTPD, BTPU,
+  BTLP(0)); the port runs at Apple's "baud" property, 3 Mbaud (not
+  Broadcom's usual 115200), 8N1 with RTS/CTS; wait for CTS (~570 ms);
+  send HCI Reset (from ROM the chip refuses configuration until reset,
+  and the server sends none); register with the HCI layer; receive on
+  IRQ 20 into a ring (polls only if the interrupt fails). Do not set the
+  16550 OUT2 bit: with it the chip never raised CTS. Chip: "BCM4350C0
+  UART 37.4 MHz Gamay", Bluetooth 4.2, runs from ROM (linux-firmware
+  has no patch for it). Also a fix in RenkuOS's bluetooth_server
+  (`3eb18cea42`): it never answered Set Event Mask / Write Simple
+  Pairing Mode, so the preferences hung on any 2.1+ controller.
+  Tested on the MacBook: the preferences show the controller, discovery
+  finds devices and their names, pairing with a phone (Secure Simple
+  Pairing, numeric comparison), encryption, ACL data both ways. Package
+  `broadcom_bluetooth.hpkg` (install with pkgman). Debugging:
+  "trace_packets true" in ~/config/settings/kernel/drivers/bcm_uart.
 
 ## Standalone drivers and edits to RenkuOS code
 
-Compared with RenkuOS main `7b0177e735` (the `wifi` merge base). Four
+Compared with RenkuOS main `7b0177e735` (the `wifi` merge base). Five
 drivers are standalone: only new folders, plus the build registration (one
 `SubInclude` line in the parent `Jamfile`, `HaikuPackages`,
 `OptionalPackages`). They can go into any RenkuOS tree by copying their
@@ -239,6 +259,7 @@ folders and adding those lines.
 | Apple SPI keyboard and trackpad | `apple_spi_input.hpkg` | `bus_managers/spi/`, `busses/spi/pch/`, `drivers/input/apple_spi/`, `input_server/filters/media_keys/`, `headers/private/spi/spi.h` |
 | FaceTime HD camera | `facetimehd.hpkg` | `drivers/video/facetimehd/`, media add-on, Camera preferences, `facetimehd_capture` |
 | Apple SMC sensors | `apple_smc.hpkg` | `drivers/sensor/apple_smc/` |
+| Bluetooth on the LPSS UART | `broadcom_bluetooth.hpkg` | `drivers/bluetooth/bcm_uart/` (needs the bluetooth_server fix below to be usable) |
 
 These changed existing RenkuOS code, so they must be merged into each
 tree's version of those files:
@@ -250,6 +271,7 @@ tree's version of those files:
 | Kaby Lake brightness | `intel_extreme` `mode.cpp` and the graphics `driver.cpp` |
 | EFI start-up fix | `boot/platform/efi/arch/x86_64/arch_start.cpp` |
 | FAT driver fixes | `file_systems/fat/kernel_interface.cpp` (`dosfs_mkdir`, `dosfs_open`) |
+| Bluetooth server fix | `servers/bluetooth/LocalDeviceImpl.cpp` (two replies) |
 
 Every edited file, with line counts: changed-files.txt.
 
@@ -326,6 +348,18 @@ them.
    fail: the package daemon may read it while it is still being copied
    ("failed to init package for file") and never activates it. Use
    `pkgman install <file>.hpkg` (macbook-drivers/install.sh does).
+10. Bluetooth: not tried yet: a Bluetooth mouse or keyboard
+   (bluetooth_hid), audio (SCO is not supported by bcm_uart). RenkuOS's
+   own gaps seen in the tests: L2CAP does not answer an information
+   request for extended features ("unhandled information request type
+   2"); the server decodes neither Broadcom's vendor event nor event
+   0x3d; a paired phone had to pair again after the test scripts
+   restarted the server (the link key may not be saved). BroadcomBluetooth
+   is not an optional image package yet (only in HaikuPackages), so
+   images do not include it. Until an image with `3eb18cea42` is
+   installed, the preferences need the fixed server (bt-test/check5.sh
+   runs it). Packet tracing is on on the MacBook: delete
+   /boot/home/config/settings/kernel/drivers/bcm_uart to turn it off.
 
 ## Notes in this branch
 

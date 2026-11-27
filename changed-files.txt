@@ -1,23 +1,26 @@
 Existing RenkuOS files changed by our work
 ==========================================
 
-Branch `wifi` at c680fd5d2a, compared with RenkuOS main at 7b0177e735
+Branch `wifi` at f1047b0513, compared with RenkuOS main at 7b0177e735
 (the merge base). Lines are added / removed. Every other file of ours is
 new. Regenerate with:
   git diff --numstat --diff-filter=M $(git merge-base wifi origin/main) wifi
 
 Build registration only (one SubInclude line per new folder, package lists)
 ---------------------------------------------------------------------------
-  +5  -0    build/jam/HaikuPackages            (APFS, AppleSMC,
-                                                AppleSPIInput, BroadcomWifi,
-                                                FaceTimeHD)
- +48  -0    build/jam/OptionalPackages         (the same five, optional
+  +6  -0    build/jam/HaikuPackages            (APFS, AppleSMC,
+                                                AppleSPIInput,
+                                                BroadcomBluetooth,
+                                                BroadcomWifi, FaceTimeHD)
+ +48  -0    build/jam/OptionalPackages         (the same five except
+                                                BroadcomBluetooth, optional
                                                 image packages)
   +1  -0    src/add-ons/input_server/filters/Jamfile     (media_keys)
   +1  -0    src/add-ons/kernel/bus_managers/Jamfile      (spi)
   +1  -0    src/add-ons/kernel/busses/Jamfile            (spi)
   +1  -0    src/add-ons/kernel/drivers/input/Jamfile     (apple_spi)
   +1  -0    src/add-ons/kernel/drivers/sensor/Jamfile    (apple_smc)
+  +1  -0    src/add-ons/kernel/drivers/bluetooth/Jamfile (bcm_uart)
   +1  -0    src/add-ons/kernel/drivers/video/Jamfile     (facetimehd)
   +1  -0    src/add-ons/kernel/file_systems/Jamfile      (apfs)
   +1  -0    src/add-ons/media/media-add-ons/Jamfile      (facetimehd)
@@ -60,3 +63,8 @@ FAT driver fixes (c680fd5d2a)
  +19  -5    src/add-ons/kernel/file_systems/fat/kernel_interface.cpp
                 (dosfs_mkdir: no put_vnode for an existing entry;
                 dosfs_open: refuse O_TRUNC on a read-only volume or file)
+
+Bluetooth server fix (3eb18cea42)
+---------------------------------
+  +2  -0    src/servers/bluetooth/LocalDeviceImpl.cpp
+                (reply to Set Event Mask and Write Simple Pairing Mode)
