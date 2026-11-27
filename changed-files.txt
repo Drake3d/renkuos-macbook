@@ -1,10 +1,10 @@
 Existing RenkuOS files changed by our work
 ==========================================
 
-Branch `wifi` at 0a39902965, compared with RenkuOS main at 7b0177e735
+Branch `macbook` at fdf35ddbb7 (code as of 0a39902965), compared with RenkuOS main at 7b0177e735
 (the merge base). Lines are added / removed. Every other file of ours is
 new. Regenerate with:
-  git diff --numstat --diff-filter=M $(git merge-base wifi origin/main) wifi
+  git diff --numstat --diff-filter=M $(git merge-base macbook origin/main) macbook
 
 Build registration only (one SubInclude line per new folder, package lists)
 ---------------------------------------------------------------------------

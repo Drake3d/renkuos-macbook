@@ -1,29 +1,26 @@
 # RenkuOS on the MacBookPro14,1: handoff
 
 Last updated 2026-11-26. Read this first when continuing on another
-computer. This branch (`notes`) holds only notes; the code is on the
-`wifi` branch of this repository (everything on `apfs`, plus the newer
-camera work and the built-in Wi-Fi).
+computer. This branch (`notes`) holds only notes; all the code is on the
+`macbook` branch of this repository, its default branch.
 
 ## Where things are
 
 - Code: github.com/Drake3d/renkuos-macbook.
-  - `wifi` (work here): `apfs` plus 3 camera commits (settings kept across
-    restarts, idle power-down, picture sizes/mirror/CodyCam settings) and
-    4 Wi-Fi commits, then the microphone gain commit (`e707a92fb1`), APFS
-    type 4 compression (`9b7dae4981`), APFS Unicode names (`bd51ec5568`)
-    the Apple SMC sensor driver (`1df69d3307`), two FAT driver fixes
-    (`c680fd5d2a`), Bluetooth (5 commits, `eb5a1d7a42`..`f1047b0513`) and
-    Bluetooth in images. Tip: `0a39902965` "build: BroadcomBluetooth as
-    an optional image package". Pushed 2026-11-26. A nightly built from it
-    is installed on the MacBook and everything checked works (2026-11-26).
-  - `apfs`: `apple-spi-input` plus the APFS driver, milestones 1-5
-    (`personal/apfs` tip `8d6d75b8a4`). The 3 camera commits sit on the
-    local `apfs` too but were pushed only as part of `wifi`.
-  - `apple-spi-input`: everything before APFS; on GitHub `apfs` was merged
-    into it (`9ad3016a27`, pull request #1 on the personal repository).
-    Before that its tip was `24f9dc8e84` "Merge RenkuOS main into
-    apple-spi-input" (RenkuOS `main` at `7b0177e735`).
+  - `macbook` (work here, the default branch): everything, on RenkuOS
+    `main` `7b0177e735`. It was called `apple-spi-input` on GitHub and
+    `wifi` locally; renamed `macbook` on 2026-11-26 (GitHub redirects the
+    old name). The `apfs` and `wifi` branches were merged into it by pull
+    requests #1, #2, #3 and #21, and are gone from GitHub. Contents, in
+    order: SPI keyboard and trackpad, media keys, sound, brightness, EFI
+    multi-CPU fix, camera, APFS (milestones 1-5, type 4, Unicode), Wi-Fi,
+    microphone gain, Apple SMC sensors, FAT fixes, Bluetooth and the
+    Bluetooth server fix. Tip: `fdf35ddbb7` (merge of #21; last code
+    commit `0a39902965` "build: BroadcomBluetooth as an optional image
+    package"). A nightly built from it is installed on the MacBook and
+    everything checked works (2026-11-26).
+  - Old local branches `apfs` and `apple-spi-input` in the working clone
+    are stale; everything in them is on `macbook`.
 - Remotes in a working clone:
   - `origin` = https://github.com/RenkuOS/Source.git (read only for us)
   - `personal` = https://github.com/Drake3d/renkuos-macbook.git
@@ -35,7 +32,7 @@ git clone https://github.com/RenkuOS/Source.git
 cd Source
 git remote add personal https://github.com/Drake3d/renkuos-macbook.git
 git fetch personal
-git switch -c wifi --track personal/wifi
+git switch -c macbook --track personal/macbook
 ```
 
 Then create `build/jam/UserBuildConfig` (git-ignored). It puts every
@@ -152,7 +149,7 @@ Done once on 2026-11-25 by merging (not rebasing, so pushed history stays):
 ```
 git fetch origin
 git branch -f main origin/main
-git switch wifi
+git switch macbook
 git merge --no-ff origin/main
 ```
 
@@ -179,7 +176,7 @@ Build, test the nightly on the MacBook, then commit the merge.
   /boot/system/packages and reboots) and sends the syslog via the FAT
   USB drive ("NEW FAT VOL"). Read it with `grep -a` (binary bytes).
 
-## Done (all on `apple-spi-input`, tested unless noted)
+## Done (all on `macbook`, tested unless noted)
 
 - apple_spi: internal keyboard and trackpad (SPI), media keys package.
 - Volume, mute, brightness (F1/F2) and media keys (F7-F9) via the
@@ -189,7 +186,7 @@ Build, test the nightly on the MacBook, then commit the merge.
 - FaceTime HD camera (5 commits): driver `facetimehd`, test tool
   `facetimehd_capture`, media add-on (CodyCam works, ~30 fps), Camera
   preferences app, package `facetimehd.hpkg`.
-- Camera, 3 more commits (on `wifi`): picture settings kept across
+- Camera, 3 more commits: picture settings kept across
   restarts (~/config/settings/kernel/drivers/facetimehd); camera powered
   down 15 s after use; any even picture size up to 1280x720 (tested
   64x48 to 1280x720 at 30 fps), Mirror and Picture size settings, and
@@ -203,7 +200,7 @@ Build, test the nightly on the MacBook, then commit the merge.
   case-insensitive volumes, any case (`bd51ec5568`), programs run from
   APFS, free space as macOS reports it; package `apfs.hpkg` (optional
   image package APFS). Tested on images and on two 4 TB macOS SSDs.
-- Built-in Wi-Fi, BCM4350 (branch `wifi`, 4 commits; see
+- Built-in Wi-Fi, BCM4350 (4 commits; see
   wifi-bcm4350-plan.md): the brcmfmac driver gained a PCIe side (firmware
   start, msgbuf rings on MSI, data path with a flow ring per priority)
   under its existing Wi-Fi logic, and both buses now share the chip code
@@ -248,7 +245,7 @@ Build, test the nightly on the MacBook, then commit the merge.
 
 ## Standalone drivers and edits to RenkuOS code
 
-Compared with RenkuOS main `7b0177e735` (the `wifi` merge base). Five
+Compared with RenkuOS main `7b0177e735` (the `macbook` merge base). Five
 drivers are standalone: only new folders, plus the build registration (one
 `SubInclude` line in the parent `Jamfile`, `HaikuPackages`,
 `OptionalPackages`). They can go into any RenkuOS tree by copying their
