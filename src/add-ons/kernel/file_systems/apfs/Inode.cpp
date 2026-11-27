@@ -17,9 +17,9 @@
 #include "BTree.h"
 #include "Container.h"
 #include "Decmpfs.h"
+#include "Unicode.h"
 #include "Volume.h"
 
-#include <CRCTable.h>
 
 
 // Longest file-system key: a hashed directory entry with a 1023-byte name
@@ -805,42 +805,6 @@ DirectoryIterator::_ReadEntry()
 }
 
 
-/*!	The directory-entry name hash for an ASCII name, as macOS computes it.
-	The reference ("j_drec_hashed_key_t") says: NFD-normalize, encode as
-	null-terminated UTF-32, CRC-32C, complement, keep 22 bits. On real
-	volumes the stored hashes match a CRC-32C over the UTF-32 (little
-	endian) code points WITHOUT the terminating null, started at 0xffffffff
-	and not complemented at the end; case-insensitive volumes hash the
-	case-folded name. Checked against every name in the test images,
-	including NFC/NFD, Japanese, emoji and upper-case names.
-	For ASCII, NFD changes nothing and case folding is lowercasing.
-*/
-static uint32
-ascii_name_hash(const char* name, bool fold)
-{
-	uint32 crc = 0xffffffff;
-	for (; *name != '\0'; name++) {
-		uint8 c = (uint8)*name;
-		if (fold && c >= 'A' && c <= 'Z')
-			c += 'a' - 'A';
-		uint8 utf32[4] = { c, 0, 0, 0 };
-		crc = calculate_crc32c(crc, utf32, sizeof(utf32));
-	}
-	return crc & (APFS_J_DREC_HASH_MASK >> APFS_J_DREC_HASH_SHIFT);
-}
-
-
-static bool
-is_ascii(const char* name)
-{
-	for (; *name != '\0'; name++) {
-		if ((uint8)*name >= 0x80)
-			return false;
-	}
-	return true;
-}
-
-
 // Hashed directory keys sort by object id, type, then name_len_and_hash as
 // a number (so by hash, then length); seen in the test images.
 static int
@@ -864,46 +828,44 @@ compare_drec_hashed(const void* _key, uint16 keyLength, const void* _target,
 }
 
 
-static bool
-names_match(const char* a, const char* b, bool ignoreCase)
-{
-	if (!ignoreCase)
-		return strcmp(a, b) == 0;
-
-	// ASCII case only for now; Unicode case folding comes with hashed
-	// lookups (milestone 3).
-	for (;; a++, b++) {
-		char x = *a;
-		char y = *b;
-		if (x >= 'A' && x <= 'Z')
-			x += 'a' - 'A';
-		if (y >= 'A' && y <= 'Z')
-			y += 'a' - 'A';
-		if (x != y)
-			return false;
-		if (x == '\0')
-			return true;
-	}
-}
-
-
 status_t
 DirectoryIterator::Lookup(const char* name, ino_t* _id)
 {
 	if (fStatus != B_OK)
 		return fStatus;
 
-	if (fHashedNames && is_ascii(name))
-		return _LookupHashed(name, _id);
+	if (fHashedNames) {
+		status_t status = _LookupHashed(name, _id);
+		if (status != B_BAD_VALUE)
+			return status;
+		// Not valid UTF-8: no hash to look for, only an exact match.
+	}
 	return _LookupScan(name, _id);
 }
 
 
+/*!	Finds \a name through the name hash, comparing names as macOS does
+	(see Unicode.h): all entries with the same hash follow each other in
+	the tree.
+*/
 status_t
 DirectoryIterator::_LookupHashed(const char* name, ino_t* _id)
 {
-	bool ignoreCase = !fDirectory->GetVolume()->IsCaseSensitive();
-	uint32 hash = ascii_name_hash(name, ignoreCase);
+	bool fold = !fDirectory->GetVolume()->IsCaseSensitive();
+	uint32* wanted = (uint32*)malloc(2 * APFS_NORMALIZED_NAME_MAX
+		* sizeof(uint32));
+	if (wanted == NULL)
+		return B_NO_MEMORY;
+	MemoryDeleter deleter(wanted);
+	uint32* candidate = wanted + APFS_NORMALIZED_NAME_MAX;
+
+	size_t wantedCount;
+	status_t status = apfs_normalize_name(name, fold, wanted, &wantedCount);
+	if (status == B_NAME_TOO_LONG)
+		return B_ENTRY_NOT_FOUND;
+	if (status != B_OK)
+		return status;
+	uint32 hash = apfs_name_hash(wanted, wantedCount);
 
 	apfs_j_drec_hashed_key target;
 	target.hdr.Set(fDirectory->ID(), APFS_TYPE_DIR_REC);
@@ -912,11 +874,10 @@ DirectoryIterator::_LookupHashed(const char* name, ino_t* _id)
 
 	fHaveLast = false;
 	fPending = false;
-	status_t status = fIterator->Seek(&target, compare_drec_hashed, NULL);
+	status = fIterator->Seek(&target, compare_drec_hashed, NULL);
 	if (status != B_OK)
 		return status;
 
-	// Every entry whose name hashes the same comes next; compare those.
 	char entry[B_FILE_NAME_LENGTH];
 	while (true) {
 		size_t length = sizeof(entry);
@@ -933,7 +894,11 @@ DirectoryIterator::_LookupHashed(const char* name, ino_t* _id)
 		if (fLastHash != hash)
 			return B_ENTRY_NOT_FOUND;
 
-		if (names_match(entry, name, ignoreCase)) {
+		size_t candidateCount;
+		if (apfs_normalize_name(entry, fold, candidate, &candidateCount)
+				== B_OK
+			&& candidateCount == wantedCount
+			&& memcmp(candidate, wanted, wantedCount * sizeof(uint32)) == 0) {
 			*_id = id;
 			return B_OK;
 		}
@@ -941,19 +906,18 @@ DirectoryIterator::_LookupHashed(const char* name, ino_t* _id)
 }
 
 
+/*!	Finds \a name by reading the whole directory and comparing bytes: for
+	volumes without hashed names (case- and normalization-sensitive), and
+	for names that are not valid UTF-8.
+*/
 status_t
 DirectoryIterator::_LookupScan(const char* name, ino_t* _id)
 {
-	bool ignoreCase = !fDirectory->GetVolume()->IsCaseSensitive();
 	status_t status = Rewind();
 	if (status != B_OK)
 		return status;
 
-	// Non-ASCII names need Unicode NFD normalization and case folding to
-	// compute their hash, so they are found by scanning. Exact (byte)
-	// matches are found; differently normalized spellings are not yet.
 	char entry[B_FILE_NAME_LENGTH];
-	ino_t caseMatch = -1;
 	while (true) {
 		size_t length = sizeof(entry);
 		ino_t id;
@@ -970,15 +934,8 @@ DirectoryIterator::_LookupScan(const char* name, ino_t* _id)
 			*_id = id;
 			return B_OK;
 		}
-		if (ignoreCase && caseMatch < 0 && names_match(entry, name, true))
-			caseMatch = id;
 	}
-
-	if (caseMatch >= 0) {
-		*_id = caseMatch;
-		return B_OK;
-	}
-	return status == B_ENTRY_NOT_FOUND ? B_ENTRY_NOT_FOUND : status;
+	return status;
 }
 
 

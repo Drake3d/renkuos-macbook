@@ -49,6 +49,7 @@ local apfsSources =
 	Inode.cpp
 	kernel_interface.cpp
 	ObjectMap.cpp
+	Unicode.cpp
 	Volume.cpp
 	;
 local lzfseSources =

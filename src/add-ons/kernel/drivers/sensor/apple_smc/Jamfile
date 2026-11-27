@@ -1,0 +1,10 @@
+SubDir HAIKU_TOP src add-ons kernel drivers sensor apple_smc ;
+
+UsePrivateKernelHeaders ;
+
+SubDirHdrs [ FDirName $(SUBDIR) $(DOTDOT) $(DOTDOT) $(DOTDOT) bus_managers acpi acpica include ] ;
+SubDirHdrs [ FDirName $(SUBDIR) $(DOTDOT) $(DOTDOT) $(DOTDOT) bus_managers acpi acpica include platform ] ;
+
+KernelAddon apple_smc :
+	apple_smc.cpp
+	;

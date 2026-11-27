@@ -1,0 +1,11 @@
+# Broadcom Bluetooth on an Intel LPSS serial port (the BCM4350 of the
+# MacBookPro14,1), as a package of its own for x86: the bcm_uart driver.
+# Work in progress. It needs no change to the kernel, so it can be
+# installed on a stock system.
+
+local broadcomBluetoothPackage = broadcom_bluetooth.hpkg ;
+HaikuPackage $(broadcomBluetoothPackage) ;
+
+AddFilesToPackage add-ons kernel drivers bluetooth : bcm_uart ;
+
+BuildHaikuPackage $(broadcomBluetoothPackage) : broadcom_bluetooth ;

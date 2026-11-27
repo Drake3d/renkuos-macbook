@@ -1,0 +1,25 @@
+name			broadcom_bluetooth
+version			%HAIKU_VERSION%
+architecture	%HAIKU_PACKAGING_ARCH%
+summary			"Broadcom Bluetooth on an Intel LPSS serial port"
+
+description		"Driver for the Bluetooth part of Broadcom chips that are \
+connected over an Intel LPSS serial port, such as the BCM4350 of the \
+MacBookPro14,1. Work in progress: it brings the chip up and logs what it \
+answers."
+
+packager		"The Haiku build system"
+vendor			"RenkuOS"
+
+copyrights		{
+	"2026 RenkuOS Contributors"
+}
+licenses		"MIT"
+
+provides {
+	broadcom_bluetooth = %HAIKU_VERSION%
+}
+
+requires {
+	haiku
+}

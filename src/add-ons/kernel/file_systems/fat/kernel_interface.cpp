@@ -2172,6 +2172,17 @@ dosfs_open(fs_volume* volume, fs_vnode* vnode, int openMode, void** _cookie)
 	if (bsdNode->v_type == VDIR && (openMode & O_RWMASK) != O_RDONLY)
 		return B_IS_A_DIRECTORY;
 
+	// Truncating writes, whatever the open mode: refuse it on a read-only
+	// volume or file before the open is made read-only below. Otherwise
+	// detrunc() frees clusters on a read-only mount, which panicked
+	// ("ASSERT FAILED ... msdosfs_fat.c: (pmp->pm_flags & 0x80000000) == 0").
+	if ((openMode & O_TRUNC) != 0) {
+		if ((bsdVolume->mnt_flag & MNT_RDONLY) != 0 || MOUNTED_READ_ONLY(fatVolume))
+			return B_READ_ONLY_DEVICE;
+		if ((fatNode->de_Attributes & ATTR_READONLY) != 0)
+			return B_NOT_ALLOWED;
+	}
+
 	if ((bsdVolume->mnt_flag & MNT_RDONLY) != 0 || (fatNode->de_Attributes & ATTR_READONLY) != 0)
 		openMode = (openMode & ~O_RWMASK) | O_RDONLY;
 
@@ -2459,12 +2470,15 @@ dosfs_mkdir(fs_volume* volume, fs_vnode* parent, const char* name, int perms)
 	perms |= S_IFDIR;
 
 	// set fatParent::de_fndoffset and de_fndcnt in preparation for createde
-	vnode* existingBsdNode;
-	status = msdosfs_lookup_ino(bsdParent, &existingBsdNode, bsdName.Data(), NULL, NULL);
+	// Only ask whether the name exists, as dosfs_create does: a node the
+	// lookup returns has no reference the VFS knows about, so releasing it
+	// with put_vnode() panicked ("put_vnode(...): not found!").
+	daddr_t existingCluster;
+	u_long existingOffset;
+	status = msdosfs_lookup_ino(bsdParent, NULL, bsdName.Data(), &existingCluster,
+		&existingOffset);
 	if (status == 0) {
-		// a directory with this name already exists
-		rw_lock_write_unlock(&existingBsdNode->v_vnlock->haikuRW);
-		put_vnode(volume, (reinterpret_cast<denode*>(existingBsdNode->v_data))->de_inode);
+		// an entry with this name already exists
 		return B_FILE_EXISTS;
 	}
 	if (status != EJUSTRETURN)
