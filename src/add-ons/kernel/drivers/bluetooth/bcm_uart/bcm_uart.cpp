@@ -27,11 +27,15 @@
  * divider of the 120 MHz input, resets), as for our LPSS SPI driver.
  *
  * The chip runs from its ROM firmware; no patch is loaded yet.
+ *
+ * "trace_packets true" in the driver settings file bcm_uart logs every
+ * command's opcode and the start of every packet received or sent.
  */
 
 
 #include <ACPI.h>
 #include <Drivers.h>
+#include <driver_settings.h>
 #include <KernelExport.h>
 #include <bus/PCI.h>
 #include <stdio.h>
@@ -158,6 +162,23 @@ static net_buffer_module_info* sBufferModule;
 
 // There is one such port; the HCI hooks only get the HCI id.
 static bcm_uart_info* sDevice;
+
+static bool sTracePackets;
+
+
+static void
+trace_packet(const char* direction, uint8 type, const uint8* data,
+	size_t length)
+{
+	char hex[3 * 16 + 1];
+	size_t offset = 0;
+	for (size_t i = 0; i < length && i < 16; i++)
+		offset += snprintf(hex + offset, sizeof(hex) - offset, " %02x", data[i]);
+	hex[offset] = '\0';
+	TRACE("%s %s, %" B_PRIuSIZE " bytes:%s\n", direction,
+		type == H4_COMMAND ? "command" : type == H4_EVENT ? "event"
+			: type == H4_ACL ? "ACL" : "SCO", length, hex);
+}
 
 
 static inline uint32
@@ -489,6 +510,9 @@ power_on(bcm_uart_info* info)
 static void
 deliver_packet(bcm_uart_info* info)
 {
+	if (sTracePackets)
+		trace_packet("rx", info->rxType, info->rxPacket, info->rxCount);
+
 	bt_packet_t type;
 	switch (info->rxType) {
 		case H4_EVENT:
@@ -598,6 +622,9 @@ reader_thread(void* data)
 static status_t
 send_packet(bcm_uart_info* info, uint8 type, const uint8* data, size_t length)
 {
+
+	if (sTracePackets)
+		trace_packet("tx", type, data, length);
 
 	MutexLocker locker(info->writeLock);
 	status_t status = uart_write(info, &type, 1);
@@ -944,13 +971,22 @@ bcm_uart_init_driver(device_node* node, void** _cookie)
 	}
 
 	read_apple_properties(info);
+
+	void* settings = load_driver_settings("bcm_uart");
+	if (settings != NULL) {
+		sTracePackets = get_driver_boolean_parameter(settings,
+			"trace_packets", false, true);
+		unload_driver_settings(settings);
+	}
+
 	mutex_init(&info->lock, "bcm_uart");
 	mutex_init(&info->writeLock, "bcm_uart write");
 	sDevice = info;
 
 	TRACE("Bluetooth on serial port %04x at 0x%" B_PRIxPHYSADDR ", %" B_PRIu32
-		" baud\n", info->pciInfo.device_id, base,
-		info->appleBaud != 0 ? info->appleBaud : kDefaultBaud);
+		" baud%s\n", info->pciInfo.device_id, base,
+		info->appleBaud != 0 ? info->appleBaud : kDefaultBaud,
+		sTracePackets ? ", tracing packets" : "");
 	*_cookie = info;
 	return B_OK;
 }
