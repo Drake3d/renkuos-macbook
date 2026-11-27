@@ -3,6 +3,7 @@ SubDir HAIKU_TOP src add-ons kernel drivers bluetooth bcm_uart ;
 SubDirC++Flags -fno-rtti ;
 
 UsePrivateKernelHeaders ;
+UsePrivateHeaders net ;
 
 SubDirHdrs [ FDirName $(SUBDIR) $(DOTDOT) $(DOTDOT) $(DOTDOT) bus_managers acpi acpica include ] ;
 SubDirHdrs [ FDirName $(SUBDIR) $(DOTDOT) $(DOTDOT) $(DOTDOT) bus_managers acpi acpica include platform ] ;

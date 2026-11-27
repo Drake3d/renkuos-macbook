@@ -7,21 +7,26 @@
 /*
  * Broadcom Bluetooth on an Intel LPSS serial port (the BCM4350 of the
  * MacBookPro14,1: ACPI device BLTH, HID BCM2E7C, below the UART URT0,
- * PCI 8086:9d27).
+ * PCI 8086:9d27), as an H4 transport for the Bluetooth stack.
  *
- * Phase 1, a probe: brings the serial port up, powers the Bluetooth part
- * of the chip on through Apple's ACPI methods, sends the standard HCI
- * commands Reset and Read Local Version Information over H4 (a packet
- * type byte, then the HCI packet) and logs the answers. It then powers
- * the chip off again; nothing is published yet.
+ * The driver publishes bluetooth/h4/bcm_uart/0, which the Bluetooth server
+ * finds (it expects a folder per driver below bluetooth/h4) and opens.
+ * On open it powers the Bluetooth part of the chip on through Apple's
+ * ACPI methods (BTPD/BTPU switch the power, BTLP(0) keeps the chip awake,
+ * BTLP(1) lets it sleep), sets the serial port to the speed of Apple's
+ * "baud" device property (3 Mbaud on the MacBookPro14,1; the chip starts
+ * there, not at Broadcom's usual 115200), waits for the chip to raise CTS
+ * and registers with the HCI layer. A thread reads the serial port and
+ * hands every complete H4 packet (type byte, then the HCI packet) to the
+ * HCI layer; RTS/CTS flow control holds the chip while the FIFO is full.
+ * Commands and ACL data from the stack are written out with their H4
+ * type byte. On close the chip is switched off again.
  *
  * Serial port: a 16550 compatible (DesignWare) UART, registers 32 bits
  * apart, followed by the LPSS private registers at +0x200 (clock M/N
  * divider of the 120 MHz input, resets), as for our LPSS SPI driver.
- * The Broadcom chip starts at 115200 baud, 8N1, with RTS/CTS.
  *
- * Apple's ACPI methods below BLTH: BTPU and BTPD switch the Bluetooth
- * power on and off, BTLP(0) keeps the chip awake (1 lets it sleep).
+ * The chip runs from its ROM firmware; no patch is loaded yet.
  */
 
 
@@ -34,6 +39,11 @@
 #include <string.h>
 
 #include <kernel.h>
+#include <lock.h>
+#include <net_buffer.h>
+#include <util/AutoLock.h>
+
+#include <bluetooth/HCI/btHCI_transport.h>
 
 extern "C" {
 #	include "acpi.h"
@@ -41,6 +51,9 @@ extern "C" {
 
 
 #define BCM_UART_DRIVER_NAME	"drivers/bluetooth/bcm_uart/driver_v1"
+#define BCM_UART_DEVICE_NAME	"drivers/bluetooth/bcm_uart/device_v1"
+#define BCM_UART_DEVFS_NAME		"bluetooth/h4/bcm_uart/%d"
+#define BCM_UART_PATHID			"bcm_uart/path_id"
 
 #define TRACE(x...)				dprintf("bcm_uart: " x)
 
@@ -89,7 +102,6 @@ static const uint16 kUartDevices[] = {
 // The LPSS input clock; the M/N divider makes 16 times the baud rate, so
 // the 16550 divisor stays 1 (120 MHz * 48 / 3125 = 16 * 115200).
 static const uint64 kInputClock = 120000000;
-static const uint32 kInitialBaud = 115200;
 
 // Apple's device properties _DSM, a0b5b7c6-1318-441c-b0c9-fe695eaf949b.
 static const uint8 kApplePropertiesUUID[16] = {
@@ -99,7 +111,12 @@ static const uint8 kApplePropertiesUUID[16] = {
 
 // H4 packet types
 #define H4_COMMAND		0x01
+#define H4_ACL			0x02
+#define H4_SCO			0x03
 #define H4_EVENT		0x04
+
+static const size_t kMaxPacket = HCI_MAX_FRAME_SIZE;
+static const uint32 kDefaultBaud = 3000000;
 
 
 struct bcm_uart_info {
@@ -115,11 +132,32 @@ struct bcm_uart_info {
 	acpi_handle				bluetooth;
 	uint32					appleBaud;		// Apple's "baud" property, or 0
 	uint32					savedClock;		// LPSS clock as the firmware left it
+
+	mutex					lock;			// open and close
+	mutex					writeLock;		// one packet at a time
+	bool					isOpen;
+	thread_id				readerThread;
+	volatile bool			running;
+	hci_id					hciID;
+	bt_hci_statistics		statistics;
+
+	// The H4 packet being received.
+	uint8					rxType;			// 0: waiting for a type byte
+	uint32					rxHeaderSize;
+	uint32					rxExpected;
+	uint32					rxCount;
+	uint32					rxDiscarded;
+	uint8					rxPacket[HCI_MAX_FRAME_SIZE];
 };
 
 
 static device_manager_info* sDeviceManager;
 static acpi_module_info* sACPI;
+static bt_hci_module_info* sHCI;
+static net_buffer_module_info* sBufferModule;
+
+// There is one such port; the HCI hooks only get the HCI id.
+static bcm_uart_info* sDevice;
 
 
 static inline uint32
@@ -253,7 +291,6 @@ uart_reset(bcm_uart_info* info)
 	write_reg(info, LPSS_RESETS, 0);
 	snooze(10);
 	write_reg(info, LPSS_RESETS, LPSS_RESETS_FUNC | LPSS_RESETS_IDMA);
-	TRACE("clock register was 0x%08" B_PRIx32 "\n", info->savedClock);
 }
 
 
@@ -287,130 +324,21 @@ uart_write(bcm_uart_info* info, const uint8* data, size_t length)
 }
 
 
-static status_t
-uart_read_byte(bcm_uart_info* info, uint8* _byte, bigtime_t deadline)
-{
-	while (true) {
-		uint32 lsr = read_reg(info, UART_LSR);
-		if ((lsr & LSR_ERRORS) != 0)
-			TRACE("line status 0x%02" B_PRIx32 "\n", lsr & 0xff);
-		if ((lsr & LSR_DATA_READY) != 0) {
-			*_byte = read_reg(info, UART_RBR);
-			return B_OK;
-		}
-		if (system_time() > deadline)
-			return B_TIMED_OUT;
-		snooze(50);
-	}
-}
+//	#pragma mark - power and setup
 
 
-//	#pragma mark - HCI
-
-
-/*!	Sends HCI command \a opcode (no parameters) and waits up to one second
-	for its Command Complete event; logs the event's bytes.
-*/
-static status_t
-hci_command(bcm_uart_info* info, uint16 opcode, const char* name)
-{
-	uint8 packet[4] = { H4_COMMAND, (uint8)opcode, (uint8)(opcode >> 8), 0 };
-	status_t status = uart_write(info, packet, sizeof(packet));
-	if (status != B_OK)
-		return status;
-
-	bigtime_t deadline = system_time() + 1000000;
-	uint8 event[260];
-	for (int tries = 0; tries < 8; tries++) {
-		// An event: type 0x04, event code, length, parameters.
-		uint8 type;
-		status = uart_read_byte(info, &type, deadline);
-		if (status != B_OK) {
-			TRACE("%s: no answer\n", name);
-			return status;
-		}
-		if (type != H4_EVENT) {
-			TRACE("%s: unexpected byte 0x%02x\n", name, type);
-			continue;
-		}
-		uint8 code;
-		uint8 length;
-		if (uart_read_byte(info, &code, deadline) != B_OK
-			|| uart_read_byte(info, &length, deadline) != B_OK) {
-			TRACE("%s: event cut short\n", name);
-			return B_TIMED_OUT;
-		}
-		for (uint32 i = 0; i < length; i++) {
-			if (uart_read_byte(info, &event[i], deadline) != B_OK) {
-				TRACE("%s: event cut short\n", name);
-				return B_TIMED_OUT;
-			}
-		}
-
-		char hex[3 * 64 + 1];
-		size_t offset = 0;
-		for (uint32 i = 0; i < length && i < 64; i++)
-			offset += snprintf(hex + offset, sizeof(hex) - offset, " %02x",
-				event[i]);
-		hex[offset] = '\0';
-		TRACE("%s: event 0x%02x, %u bytes:%s\n", name, code, length, hex);
-
-		// Command Complete (0x0e) for this opcode ends the wait.
-		if (code == 0x0e && length >= 4 && event[1] == (uint8)opcode
-			&& event[2] == (uint8)(opcode >> 8)) {
-			if (event[3] != 0) {
-				TRACE("%s: status 0x%02x\n", name, event[3]);
-				return B_ERROR;
-			}
-			if (opcode == 0x0c14 && length > 4) {
-				char localName[249];
-				uint32 nameLength = min_c((uint32)length - 4,
-					(uint32)sizeof(localName) - 1);
-				memcpy(localName, event + 4, nameLength);
-				localName[nameLength] = '\0';
-				TRACE("local name \"%s\"\n", localName);
-			}
-			if (opcode == 0x1009 && length >= 10) {
-				TRACE("BD_ADDR %02x:%02x:%02x:%02x:%02x:%02x\n", event[9],
-					event[8], event[7], event[6], event[5], event[4]);
-			}
-			if (opcode == 0x1001 && length >= 12) {
-				TRACE("HCI version %u, revision 0x%04x, LMP version %u, "
-					"manufacturer %u, LMP subversion 0x%04x\n", event[4],
-					event[5] | (event[6] << 8), event[7],
-					event[8] | (event[9] << 8), event[10] | (event[11] << 8));
-			}
-			return B_OK;
-		}
-	}
-	return B_ERROR;
-}
-
-
+//!	Reads the speed of the link from Apple's device properties (_DSM).
 static void
-log_status(bcm_uart_info* info, acpi_handle handle, const char* name)
-{
-	acpi_object_type value;
-	if (sACPI->evaluate_object(handle, "_STA", NULL, &value, sizeof(value))
-			== B_OK && value.object_type == ACPI_TYPE_INTEGER) {
-		TRACE("%s _STA 0x%" B_PRIx64 "\n", name, value.integer.integer);
-	} else
-		TRACE("%s has no _STA\n", name);
-}
-
-
-//!	Logs Apple's device properties of the Bluetooth node.
-static void
-log_apple_properties(bcm_uart_info* info)
+read_apple_properties(bcm_uart_info* info)
 {
 	acpi_object_type arguments[4];
 	arguments[0].object_type = ACPI_TYPE_BUFFER;
 	arguments[0].buffer.buffer = (void*)kApplePropertiesUUID;
 	arguments[0].buffer.length = sizeof(kApplePropertiesUUID);
 	arguments[1].object_type = ACPI_TYPE_INTEGER;
-	arguments[1].integer.integer = 1;
+	arguments[1].integer.integer = 1;	// revision
 	arguments[2].object_type = ACPI_TYPE_INTEGER;
-	arguments[2].integer.integer = 1;
+	arguments[2].integer.integer = 1;	// function: get properties
 	arguments[3].object_type = ACPI_TYPE_PACKAGE;
 	arguments[3].package.count = 0;
 	arguments[3].package.objects = NULL;
@@ -422,50 +350,29 @@ log_apple_properties(bcm_uart_info* info)
 	buffer.pointer = NULL;
 	buffer.length = ACPI_ALLOCATE_BUFFER;
 	if (sACPI->evaluate_method(info->bluetooth, "_DSM", &args, &buffer)
-			!= B_OK) {
-		TRACE("BLTH: no device properties\n");
+			!= B_OK)
 		return;
-	}
-	acpi_object_type* properties = (acpi_object_type*)buffer.pointer;
-	if (properties == NULL || properties->object_type != ACPI_TYPE_PACKAGE) {
-		TRACE("BLTH: device properties are not a package\n");
-		free(buffer.pointer);
-		return;
-	}
-	for (uint32 i = 0; i + 1 < properties->package.count; i += 2) {
-		acpi_object_type* name = &properties->package.objects[i];
-		acpi_object_type* value = &properties->package.objects[i + 1];
-		if (name->object_type != ACPI_TYPE_STRING
-			|| name->string.string == NULL)
-			continue;
-		uint64 number = 0;
-		if (value->object_type == ACPI_TYPE_INTEGER)
-			number = value->integer.integer;
-		else if (value->object_type == ACPI_TYPE_BUFFER) {
-			const uint8* data = (const uint8*)value->buffer.buffer;
-			for (uint32 j = 0; j < value->buffer.length && j < 8; j++)
-				number |= (uint64)data[j] << (j * 8);
-		}
-		if (strcmp(name->string.string, "baud") == 0 && number > 0
-			&& number <= 4000000)
-			info->appleBaud = (uint32)number;
 
-		if (value->object_type == ACPI_TYPE_INTEGER) {
-			TRACE("BLTH property %s = 0x%" B_PRIx64 "\n", name->string.string,
-				value->integer.integer);
-		} else if (value->object_type == ACPI_TYPE_BUFFER) {
-			char hex[3 * 16 + 1];
-			size_t offset = 0;
-			const uint8* data = (const uint8*)value->buffer.buffer;
-			for (uint32 j = 0; j < value->buffer.length && j < 16; j++) {
-				offset += snprintf(hex + offset, sizeof(hex) - offset, " %02x",
-					data[j]);
+	// The package holds name, value pairs; "baud" is an 8-byte buffer.
+	acpi_object_type* properties = (acpi_object_type*)buffer.pointer;
+	if (properties != NULL && properties->object_type == ACPI_TYPE_PACKAGE) {
+		for (uint32 i = 0; i + 1 < properties->package.count; i += 2) {
+			acpi_object_type* name = &properties->package.objects[i];
+			acpi_object_type* value = &properties->package.objects[i + 1];
+			if (name->object_type != ACPI_TYPE_STRING
+				|| name->string.string == NULL
+				|| strcmp(name->string.string, "baud") != 0)
+				continue;
+			uint64 number = 0;
+			if (value->object_type == ACPI_TYPE_INTEGER)
+				number = value->integer.integer;
+			else if (value->object_type == ACPI_TYPE_BUFFER) {
+				const uint8* data = (const uint8*)value->buffer.buffer;
+				for (uint32 j = 0; j < value->buffer.length && j < 8; j++)
+					number |= (uint64)data[j] << (j * 8);
 			}
-			hex[offset] = '\0';
-			TRACE("BLTH property %s =%s\n", name->string.string, hex);
-		} else if (value->object_type == ACPI_TYPE_STRING) {
-			TRACE("BLTH property %s = \"%s\"\n", name->string.string,
-				value->string.string);
+			if (number > 0 && number <= 4000000)
+				info->appleBaud = (uint32)number;
 		}
 	}
 	free(buffer.pointer);
@@ -490,39 +397,459 @@ wait_for_cts(bcm_uart_info* info, bigtime_t timeout)
 }
 
 
-static void
-probe_chip(bcm_uart_info* info)
+
+
+/*!	Sends HCI Reset and waits up to a second for its Command Complete
+	(04 0e 04 01 03 0c, then the status), before the reader thread runs.
+*/
+static status_t
+reset_chip(bcm_uart_info* info)
 {
-	log_status(info, info->bluetooth, "BLTH");
-	log_apple_properties(info);
-	// Apple's firmware leaves the chip at the speed of its "baud" property
-	// (3 Mbaud on the MacBookPro14,1), not at Broadcom's usual 115200.
-	uint32 baud = info->appleBaud != 0 ? info->appleBaud : 3000000;
+	static const uint8 kReset[] = { H4_COMMAND, 0x03, 0x0c, 0x00 };
+	status_t status = uart_write(info, kReset, sizeof(kReset));
+	if (status != B_OK)
+		return status;
 
-	uart_reset(info);
-	uart_set_baud(info, baud, true);
-
-	// Power cycle the Bluetooth part and keep it awake.
-	call_method(info, "BTPD");
-	snooze(50000);
-	call_method(info, "BTPU");
-	call_method_with(info, "BTLP", 0);
-	if (wait_for_cts(info, 1000000)) {
-		uart_drain(info);
-		if (hci_command(info, 0x0c03, "HCI Reset") == B_OK) {
-			hci_command(info, 0x1001, "Read Local Version");
-			hci_command(info, 0x1009, "Read BD_ADDR");
-			hci_command(info, 0x0c14, "Read Local Name");
-			// Broadcom: Read Verbose Config Version Info (chip and build).
-			hci_command(info, 0xfc79, "Broadcom Verbose Config");
+	static const uint8 kComplete[] = { H4_EVENT, 0x0e, 0x04, 0x01, 0x03,
+		0x0c };
+	uint8 answer[sizeof(kComplete) + 1];
+	uint32 count = 0;
+	bigtime_t deadline = system_time() + 1000000;
+	while (count < sizeof(answer)) {
+		if ((read_reg(info, UART_LSR) & LSR_DATA_READY) == 0) {
+			if (system_time() > deadline) {
+				TRACE("no answer to HCI Reset\n");
+				return B_TIMED_OUT;
+			}
+			snooze(100);
+			continue;
 		}
+		uint8 byte = read_reg(info, UART_RBR);
+		// Skip anything before the event starts.
+		if (count == 0 && byte != H4_EVENT)
+			continue;
+		answer[count++] = byte;
 	}
+	if (memcmp(answer, kComplete, sizeof(kComplete)) != 0
+		|| answer[sizeof(kComplete)] != 0) {
+		TRACE("unexpected answer to HCI Reset: %02x %02x %02x %02x %02x %02x "
+			"%02x\n", answer[0], answer[1], answer[2], answer[3], answer[4],
+			answer[5], answer[6]);
+		return B_ERROR;
+	}
+	return B_OK;
+}
 
-	// Phase 1 ends here: switch the Bluetooth part off again and give the
-	// port its clock back.
+
+static void
+power_off(bcm_uart_info* info)
+{
 	call_method_with(info, "BTLP", 1);
 	call_method(info, "BTPD");
 	write_reg(info, LPSS_CLOCK_PARAMS, info->savedClock | LPSS_CLOCK_UPDATE);
+}
+
+
+//!	Powers the Bluetooth part on and waits until it takes data.
+static status_t
+power_on(bcm_uart_info* info)
+{
+	uint32 baud = info->appleBaud != 0 ? info->appleBaud : kDefaultBaud;
+	uart_reset(info);
+	uart_set_baud(info, baud, true);
+
+	call_method(info, "BTPD");
+	snooze(50000);
+	if (call_method(info, "BTPU") != B_OK)
+		return B_ERROR;
+	call_method_with(info, "BTLP", 0);
+
+	if (!wait_for_cts(info, 1000000)) {
+		power_off(info);
+		return B_TIMED_OUT;
+	}
+	uart_drain(info);
+
+	// Fresh from its ROM the chip refuses configuration commands ("Command
+	// Disallowed") until it has been reset, and the Bluetooth server does
+	// not send a reset: send one here, before the stack sees the chip.
+	status_t status = reset_chip(info);
+	if (status != B_OK) {
+		power_off(info);
+		return status;
+	}
+	return B_OK;
+}
+
+
+//	#pragma mark - receiving
+
+
+//!	Hands a complete H4 packet to the HCI layer.
+static void
+deliver_packet(bcm_uart_info* info)
+{
+	bt_packet_t type;
+	switch (info->rxType) {
+		case H4_EVENT:
+			type = BT_EVENT;
+			info->statistics.eventRX++;
+			break;
+		case H4_ACL:
+			type = BT_ACL;
+			info->statistics.aclRX++;
+			break;
+		default:
+			type = BT_SCO;
+			info->statistics.scoRX++;
+			break;
+	}
+	info->statistics.bytesRX += info->rxCount;
+
+	if (sHCI->PostTransportPacket(info->hciID, type, info->rxPacket,
+			info->rxCount) == B_OK)
+		info->statistics.successfulRX++;
+	else
+		info->statistics.errorRX++;
+}
+
+
+//!	Feeds one received byte into the H4 packet being assembled.
+static void
+receive_byte(bcm_uart_info* info, uint8 byte)
+{
+	if (info->rxType == 0) {
+		// A packet starts with its type; anything else is noise.
+		switch (byte) {
+			case H4_EVENT:
+				info->rxHeaderSize = 2;		// event code, length
+				break;
+			case H4_ACL:
+				info->rxHeaderSize = 4;		// handle, 16-bit length
+				break;
+			case H4_SCO:
+				info->rxHeaderSize = 3;		// handle, length
+				break;
+			default:
+				if (info->rxDiscarded++ == 0)
+					TRACE("unexpected byte 0x%02x, skipping\n", byte);
+				return;
+		}
+		info->rxType = byte;
+		info->rxCount = 0;
+		info->rxExpected = info->rxHeaderSize;
+		return;
+	}
+
+	info->rxPacket[info->rxCount++] = byte;
+	if (info->rxCount == info->rxHeaderSize) {
+		uint32 payload;
+		if (info->rxType == H4_EVENT)
+			payload = info->rxPacket[1];
+		else if (info->rxType == H4_ACL)
+			payload = info->rxPacket[2] | (info->rxPacket[3] << 8);
+		else
+			payload = info->rxPacket[2];
+		info->rxExpected = info->rxHeaderSize + payload;
+		if (info->rxExpected > sizeof(info->rxPacket)) {
+			TRACE("packet of %" B_PRIu32 " bytes is too big, dropped\n",
+				info->rxExpected);
+			info->statistics.rejectedRX++;
+			info->rxType = 0;
+			return;
+		}
+	}
+	if (info->rxCount >= info->rxHeaderSize
+		&& info->rxCount == info->rxExpected) {
+		deliver_packet(info);
+		info->rxType = 0;
+	}
+}
+
+
+/*!	Reads the serial port. The FIFO holds 64 bytes; when it is full the
+	UART drops RTS and the chip waits, so polling loses nothing.
+*/
+static status_t
+reader_thread(void* data)
+{
+	bcm_uart_info* info = (bcm_uart_info*)data;
+	while (info->running) {
+		bool received = false;
+		for (int i = 0; i < 512; i++) {
+			uint32 lsr = read_reg(info, UART_LSR);
+			if ((lsr & LSR_ERRORS) != 0)
+				info->statistics.errorRX++;
+			if ((lsr & LSR_DATA_READY) == 0)
+				break;
+			receive_byte(info, read_reg(info, UART_RBR));
+			received = true;
+		}
+		if (!received)
+			snooze(1000);
+	}
+	return B_OK;
+}
+
+
+//	#pragma mark - sending
+
+
+static status_t
+send_packet(bcm_uart_info* info, uint8 type, const uint8* data, size_t length)
+{
+
+	MutexLocker locker(info->writeLock);
+	status_t status = uart_write(info, &type, 1);
+	if (status == B_OK)
+		status = uart_write(info, data, length);
+	if (status == B_OK) {
+		info->statistics.successfulTX++;
+		info->statistics.bytesTX += length + 1;
+	} else
+		info->statistics.errorTX++;
+	return status;
+}
+
+
+static status_t
+send_command_hook(hci_id id, net_buffer* buffer)
+{
+	bcm_uart_info* info = sDevice;
+	if (info == NULL || !info->isOpen || id != info->hciID)
+		return B_ERROR;
+	if (buffer->size == 0 || buffer->size > HCI_MAX_EVENT_SIZE)
+		return B_BAD_VALUE;
+
+	// The buffer stays the caller's, as with the USB transport.
+	uint8 command[HCI_MAX_EVENT_SIZE];
+	size_t length = buffer->size;
+	status_t status = sBufferModule->read(buffer, 0, command, length);
+	if (status != B_OK)
+		return status;
+	info->statistics.commandTX++;
+	return send_packet(info, H4_COMMAND, command, length);
+}
+
+
+static status_t
+send_acl_hook(hci_id id, net_buffer* buffer)
+{
+	bcm_uart_info* info = sDevice;
+	if (info == NULL || !info->isOpen || id != info->hciID)
+		return B_ERROR;
+	if (buffer->size == 0 || buffer->size > HCI_MAX_FRAME_SIZE)
+		return B_BAD_VALUE;
+
+	uint8* data = (uint8*)malloc(buffer->size);
+	if (data == NULL)
+		return B_NO_MEMORY;
+	size_t length = buffer->size;
+	status_t status = sBufferModule->read(buffer, 0, data, length);
+	if (status == B_OK) {
+		info->statistics.aclTX++;
+		status = send_packet(info, H4_ACL, data, length);
+	}
+	free(data);
+
+	// Sent ACL buffers are freed by the transport, as with USB.
+	if (status == B_OK)
+		sBufferModule->free(buffer);
+	return status;
+}
+
+
+static status_t
+send_sco_hook(hci_id id, net_buffer* buffer)
+{
+	return B_NOT_SUPPORTED;
+}
+
+
+static status_t
+deliver_statistics_hook(hci_id id, bt_hci_statistics* statistics)
+{
+	bcm_uart_info* info = sDevice;
+	if (info == NULL || id != info->hciID)
+		return B_ERROR;
+	memcpy(statistics, &info->statistics, sizeof(bt_hci_statistics));
+	return B_OK;
+}
+
+
+static bt_hci_transport_hooks sHooks = {
+	send_command_hook,
+	send_acl_hook,
+	send_sco_hook,
+	NULL,	// eSCO
+	deliver_statistics_hook,
+	H4
+};
+
+
+//	#pragma mark - device module
+
+
+static status_t
+bcm_uart_init_device(void* driverCookie, void** _cookie)
+{
+	*_cookie = driverCookie;
+	return B_OK;
+}
+
+
+static void
+bcm_uart_uninit_device(void* cookie)
+{
+}
+
+
+static status_t
+bcm_uart_open(void* initCookie, const char* path, int flags, void** _cookie)
+{
+	bcm_uart_info* info = (bcm_uart_info*)initCookie;
+	MutexLocker locker(info->lock);
+	if (info->isOpen)
+		return B_BUSY;
+
+	if (get_module(BT_HCI_MODULE_NAME, (module_info**)&sHCI) != B_OK) {
+		TRACE("no Bluetooth stack (%s)\n", BT_HCI_MODULE_NAME);
+		return B_ERROR;
+	}
+	if (get_module(NET_BUFFER_MODULE_NAME, (module_info**)&sBufferModule)
+			!= B_OK) {
+		put_module(BT_HCI_MODULE_NAME);
+		return B_ERROR;
+	}
+
+	status_t status = power_on(info);
+	if (status != B_OK) {
+		TRACE("the Bluetooth chip does not come up: %s\n", strerror(status));
+		put_module(NET_BUFFER_MODULE_NAME);
+		put_module(BT_HCI_MODULE_NAME);
+		return status;
+	}
+
+	bluetooth_device* device;
+	status = sHCI->RegisterDriver(&sHooks, &device);
+	if (status != B_OK) {
+		power_off(info);
+		put_module(NET_BUFFER_MODULE_NAME);
+		put_module(BT_HCI_MODULE_NAME);
+		return status;
+	}
+	info->hciID = device->index;
+	memset(&info->statistics, 0, sizeof(info->statistics));
+	info->rxType = 0;
+	info->rxDiscarded = 0;
+	info->isOpen = true;
+
+	info->running = true;
+	info->readerThread = spawn_kernel_thread(reader_thread, "bcm_uart reader",
+		B_REAL_TIME_DISPLAY_PRIORITY, info);
+	if (info->readerThread >= 0)
+		resume_thread(info->readerThread);
+
+	TRACE("Bluetooth controller up as HCI device %" B_PRId32 "\n",
+		info->hciID);
+	*_cookie = info;
+	return B_OK;
+}
+
+
+static status_t
+bcm_uart_close(void* cookie)
+{
+	bcm_uart_info* info = (bcm_uart_info*)cookie;
+	MutexLocker locker(info->lock);
+	if (!info->isOpen)
+		return B_OK;
+
+	info->running = false;
+	if (info->readerThread >= 0) {
+		status_t result;
+		wait_for_thread(info->readerThread, &result);
+		info->readerThread = -1;
+	}
+	sHCI->UnregisterDriver(info->hciID);
+	info->isOpen = false;
+	power_off(info);
+
+	put_module(NET_BUFFER_MODULE_NAME);
+	put_module(BT_HCI_MODULE_NAME);
+	TRACE("Bluetooth controller down\n");
+	return B_OK;
+}
+
+
+static status_t
+bcm_uart_free(void* cookie)
+{
+	return B_OK;
+}
+
+
+static status_t
+bcm_uart_read(void* cookie, off_t position, void* buffer, size_t* _length)
+{
+	*_length = 0;
+	return B_OK;
+}
+
+
+static status_t
+bcm_uart_write(void* cookie, off_t position, const void* buffer,
+	size_t* _length)
+{
+	return B_NOT_ALLOWED;
+}
+
+
+static status_t
+copy_out(void* to, const void* from, size_t length)
+{
+	if (IS_USER_ADDRESS(to))
+		return user_memcpy(to, from, length);
+	memcpy(to, from, length);
+	return B_OK;
+}
+
+
+static status_t
+bcm_uart_control(void* cookie, uint32 op, void* argument, size_t length)
+{
+	bcm_uart_info* info = (bcm_uart_info*)cookie;
+	if (argument == NULL)
+		return B_BAD_VALUE;
+
+	switch (op) {
+		case GET_HCI_ID:
+			return copy_out(argument, &info->hciID, sizeof(hci_id));
+
+		case GET_STATS:
+			return copy_out(argument, &info->statistics,
+				sizeof(bt_hci_statistics));
+
+		case BT_UP:
+			// Reading runs from the open on.
+			return B_OK;
+
+		case ISSUE_BT_COMMAND:
+		{
+			// An HCI command from the Bluetooth server, without type byte.
+			if (length == 0 || length > HCI_MAX_EVENT_SIZE)
+				return B_BAD_VALUE;
+			uint8 command[HCI_MAX_EVENT_SIZE];
+			if (IS_USER_ADDRESS(argument)) {
+				if (user_memcpy(command, argument, length) != B_OK)
+					return B_BAD_ADDRESS;
+			} else
+				memcpy(command, argument, length);
+			info->statistics.commandTX++;
+			return send_packet(info, H4_COMMAND, command, length);
+		}
+	}
+	return B_DEV_INVALID_IOCTL;
 }
 
 
@@ -574,6 +901,7 @@ bcm_uart_init_driver(device_node* node, void** _cookie)
 		return B_NO_MEMORY;
 	info->node = node;
 	info->registersArea = -1;
+	info->readerThread = -1;
 
 	device_node* parent = sDeviceManager->get_parent_node(node);
 	sDeviceManager->get_driver(parent, (driver_module_info**)&info->pci,
@@ -600,8 +928,6 @@ bcm_uart_init_driver(device_node* node, void** _cookie)
 		free(info);
 		return B_ERROR;
 	}
-	TRACE("Bluetooth on serial port %04x at 0x%" B_PRIxPHYSADDR "\n",
-		info->pciInfo.device_id, base);
 
 	info->pci->set_powerstate(info->device, PCI_pm_state_d0);
 	uint16 command = info->pci->read_pci_config(info->device, PCI_command, 2);
@@ -617,8 +943,14 @@ bcm_uart_init_driver(device_node* node, void** _cookie)
 		return status;
 	}
 
-	probe_chip(info);
+	read_apple_properties(info);
+	mutex_init(&info->lock, "bcm_uart");
+	mutex_init(&info->writeLock, "bcm_uart write");
+	sDevice = info;
 
+	TRACE("Bluetooth on serial port %04x at 0x%" B_PRIxPHYSADDR ", %" B_PRIu32
+		" baud\n", info->pciInfo.device_id, base,
+		info->appleBaud != 0 ? info->appleBaud : kDefaultBaud);
 	*_cookie = info;
 	return B_OK;
 }
@@ -628,8 +960,27 @@ static void
 bcm_uart_uninit_driver(void* cookie)
 {
 	bcm_uart_info* info = (bcm_uart_info*)cookie;
+	if (sDevice == info)
+		sDevice = NULL;
+	mutex_destroy(&info->lock);
+	mutex_destroy(&info->writeLock);
 	delete_area(info->registersArea);
 	free(info);
+}
+
+
+static status_t
+bcm_uart_register_child_devices(void* cookie)
+{
+	bcm_uart_info* info = (bcm_uart_info*)cookie;
+	int pathID = sDeviceManager->create_id(BCM_UART_PATHID);
+	if (pathID < 0)
+		return B_ERROR;
+
+	char name[B_DEV_NAME_LENGTH];
+	snprintf(name, sizeof(name), BCM_UART_DEVFS_NAME, pathID);
+	return sDeviceManager->publish_device(info->node, name,
+		BCM_UART_DEVICE_NAME);
 }
 
 
@@ -650,13 +1001,35 @@ static driver_module_info sBcmUartDriver = {
 	bcm_uart_register_device,
 	bcm_uart_init_driver,
 	bcm_uart_uninit_driver,
-	NULL,	// register child devices
+	bcm_uart_register_child_devices,
 	NULL,	// rescan
 	NULL,	// removed
 };
 
 
+static struct device_module_info sBcmUartDevice = {
+	{
+		BCM_UART_DEVICE_NAME,
+		0,
+		NULL
+	},
+	bcm_uart_init_device,
+	bcm_uart_uninit_device,
+	NULL,	// removed
+	bcm_uart_open,
+	bcm_uart_close,
+	bcm_uart_free,
+	bcm_uart_read,
+	bcm_uart_write,
+	NULL,	// io
+	bcm_uart_control,
+	NULL,	// select
+	NULL	// deselect
+};
+
+
 module_info* modules[] = {
 	(module_info*)&sBcmUartDriver,
+	(module_info*)&sBcmUartDevice,
 	NULL
 };
