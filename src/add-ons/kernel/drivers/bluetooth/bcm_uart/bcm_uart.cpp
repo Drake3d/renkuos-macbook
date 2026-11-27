@@ -75,16 +75,24 @@ static const uint16 kUartDevices[] = {
 #define UART_DLL		0x00	// divisor low (DLAB)
 #define UART_DLM		0x04	// divisor high (DLAB)
 #define UART_IER		0x04
+#define UART_IIR		0x08	// interrupt identification (read)
 #define UART_FCR		0x08	// FIFO control (write)
 #define UART_LCR		0x0c
 #define UART_MCR		0x10
 #define UART_LSR		0x14
 #define UART_MSR		0x18
+#define UART_USR		0x7c	// DesignWare: status, clears "busy detect"
 
 #define LCR_8N1			0x03
 #define LCR_DLAB		0x80
 #define FCR_ENABLE		0x01
 #define FCR_CLEAR		0x06	// clear both FIFOs
+#define FCR_RX_HALF		0x80	// receive interrupt at half the FIFO
+#define IER_RX			0x01	// receive data / character timeout
+#define IER_LINE		0x04	// receiver line status
+#define IIR_NONE		0x01	// no interrupt pending
+#define IIR_MASK		0x0f
+#define IIR_BUSY		0x07	// DesignWare: LCR written while busy
 #define MCR_DTR			0x01
 #define MCR_RTS			0x02
 #define MCR_AUTO_FLOW	0x20	// hardware RTS/CTS
@@ -141,6 +149,17 @@ struct bcm_uart_info {
 	mutex					writeLock;		// one packet at a time
 	bool					isOpen;
 	thread_id				readerThread;
+	int32					irq;			// 0: none, the port is polled
+	bool					irqInstalled;
+	sem_id					rxSemaphore;
+
+	// Bytes the interrupt handler took from the FIFO, for the reader
+	// thread: written at rxHead by the handler only, read at rxTail by the
+	// thread only.
+	uint8					rxRing[8192];
+	volatile uint32			rxHead;
+	volatile uint32			rxTail;
+	volatile bool			rxStopped;		// ring was full, receiving off
 	volatile bool			running;
 	hci_id					hciID;
 	bt_hci_statistics		statistics;
@@ -294,7 +313,7 @@ uart_set_baud(bcm_uart_info* info, uint32 baud, bool flowControl)
 	write_reg(info, UART_DLL, 1);
 	write_reg(info, UART_DLM, 0);
 	write_reg(info, UART_LCR, LCR_8N1);
-	write_reg(info, UART_FCR, FCR_ENABLE | FCR_CLEAR);
+	write_reg(info, UART_FCR, FCR_ENABLE | FCR_CLEAR | FCR_RX_HALF);
 	write_reg(info, UART_MCR, MCR_DTR | MCR_RTS
 		| (flowControl ? MCR_AUTO_FLOW : 0));
 	TRACE("serial port at %" B_PRIu32 " baud (M/N %" B_PRIu32 "/%" B_PRIu32
@@ -479,13 +498,24 @@ power_on(bcm_uart_info* info)
 	uart_reset(info);
 	uart_set_baud(info, baud, true);
 
-	call_method(info, "BTPD");
-	snooze(50000);
-	if (call_method(info, "BTPU") != B_OK)
-		return B_ERROR;
-	call_method_with(info, "BTLP", 0);
-
-	if (!wait_for_cts(info, 1000000)) {
+	// The chip is usually ready some 570 ms after power-up; give it more,
+	// and one more power cycle with a longer pause if it stays silent.
+	bool ready = false;
+	for (int attempt = 0; attempt < 2 && !ready; attempt++) {
+		call_method(info, "BTPD");
+		snooze(attempt == 0 ? 50000 : 500000);
+		if (call_method(info, "BTPU") != B_OK)
+			return B_ERROR;
+		call_method_with(info, "BTLP", 0);
+		ready = wait_for_cts(info, 3000000);
+		if (!ready) {
+			TRACE("MSR 0x%02" B_PRIx32 ", LSR 0x%02" B_PRIx32 "%s\n",
+				read_reg(info, UART_MSR) & 0xff,
+				read_reg(info, UART_LSR) & 0xff,
+				attempt == 0 ? ", powering the chip off and on again" : "");
+		}
+	}
+	if (!ready) {
 		power_off(info);
 		return B_TIMED_OUT;
 	}
@@ -591,14 +621,95 @@ receive_byte(bcm_uart_info* info, uint8 byte)
 }
 
 
-/*!	Reads the serial port. The FIFO holds 64 bytes; when it is full the
-	UART drops RTS and the chip waits, so polling loses nothing.
+/*!	The serial port's interrupt: moves the received bytes into the ring
+	and wakes the reader thread. The FIFO interrupts when half full or
+	when bytes have waited a few character times.
+*/
+static int32
+uart_interrupt(void* data)
+{
+	bcm_uart_info* info = (bcm_uart_info*)data;
+	uint32 iir = read_reg(info, UART_IIR) & IIR_MASK;
+	if ((iir & IIR_NONE) != 0)
+		return B_UNHANDLED_INTERRUPT;
+	if (iir == IIR_BUSY) {
+		read_reg(info, UART_USR);
+		return B_HANDLED_INTERRUPT;
+	}
+
+	bool received = false;
+	while (true) {
+		uint32 lsr = read_reg(info, UART_LSR);
+		if ((lsr & LSR_ERRORS) != 0)
+			info->statistics.errorRX++;
+		if ((lsr & LSR_DATA_READY) == 0)
+			break;
+		uint32 next = (info->rxHead + 1) % sizeof(info->rxRing);
+		if (next == info->rxTail) {
+			// The thread is behind: stop receiving until it catches up;
+			// RTS holds the chip meanwhile.
+			write_reg(info, UART_IER, 0);
+			info->rxStopped = true;
+			break;
+		}
+		info->rxRing[info->rxHead] = read_reg(info, UART_RBR);
+		info->rxHead = next;
+		received = true;
+	}
+
+	if (received || info->rxStopped) {
+		release_sem_etc(info->rxSemaphore, 1, B_DO_NOT_RESCHEDULE);
+		return B_INVOKE_SCHEDULER;
+	}
+	return B_HANDLED_INTERRUPT;
+}
+
+
+static void
+stop_interrupt(bcm_uart_info* info)
+{
+	if (!info->irqInstalled)
+		return;
+	write_reg(info, UART_IER, 0);
+	remove_io_interrupt_handler(info->irq, uart_interrupt, info);
+	info->irqInstalled = false;
+	delete_sem(info->rxSemaphore);
+	info->rxSemaphore = -1;
+}
+
+
+/*!	Hands the received bytes to the H4 parser: from the interrupt's ring,
+	or, without an interrupt, straight from the port. The FIFO holds 64
+	bytes; when it is full the UART drops RTS and the chip waits, so
+	neither way loses data.
 */
 static status_t
 reader_thread(void* data)
 {
 	bcm_uart_info* info = (bcm_uart_info*)data;
 	while (info->running) {
+		if (info->irqInstalled) {
+			status_t status = acquire_sem_etc(info->rxSemaphore, 1,
+				B_RELATIVE_TIMEOUT, 100000);
+			if (status == B_TIMED_OUT && info->rxTail == info->rxHead
+				&& (read_reg(info, UART_LSR) & LSR_DATA_READY) != 0) {
+				// Data has waited 100 ms without an interrupt: the
+				// interrupt does not work here, poll instead.
+				TRACE("no interrupts from the serial port, polling\n");
+				stop_interrupt(info);
+				continue;
+			}
+			while (info->rxTail != info->rxHead) {
+				receive_byte(info, info->rxRing[info->rxTail]);
+				info->rxTail = (info->rxTail + 1) % sizeof(info->rxRing);
+			}
+			if (info->rxStopped) {
+				info->rxStopped = false;
+				write_reg(info, UART_IER, IER_RX | IER_LINE);
+			}
+			continue;
+		}
+
 		bool received = false;
 		for (int i = 0; i < 512; i++) {
 			uint32 lsr = read_reg(info, UART_LSR);
@@ -613,6 +724,30 @@ reader_thread(void* data)
 			snooze(1000);
 	}
 	return B_OK;
+}
+
+
+//!	Receives through the interrupt if the port has one; else it is polled.
+static void
+start_interrupt(bcm_uart_info* info)
+{
+	info->rxHead = info->rxTail = 0;
+	info->rxStopped = false;
+	if (info->irq == 0)
+		return;
+
+	info->rxSemaphore = create_sem(0, "bcm_uart receive");
+	if (info->rxSemaphore < 0)
+		return;
+	if (install_io_interrupt_handler(info->irq, uart_interrupt, info, 0)
+			!= B_OK) {
+		TRACE("cannot use interrupt %" B_PRId32 ", polling\n", info->irq);
+		delete_sem(info->rxSemaphore);
+		info->rxSemaphore = -1;
+		return;
+	}
+	info->irqInstalled = true;
+	write_reg(info, UART_IER, IER_RX | IER_LINE);
 }
 
 
@@ -771,14 +906,15 @@ bcm_uart_open(void* initCookie, const char* path, int flags, void** _cookie)
 	info->rxDiscarded = 0;
 	info->isOpen = true;
 
+	start_interrupt(info);
 	info->running = true;
 	info->readerThread = spawn_kernel_thread(reader_thread, "bcm_uart reader",
 		B_REAL_TIME_DISPLAY_PRIORITY, info);
 	if (info->readerThread >= 0)
 		resume_thread(info->readerThread);
 
-	TRACE("Bluetooth controller up as HCI device %" B_PRId32 "\n",
-		info->hciID);
+	TRACE("Bluetooth controller up as HCI device %" B_PRId32 ", %s\n",
+		info->hciID, info->irqInstalled ? "interrupt driven" : "polled");
 	*_cookie = info;
 	return B_OK;
 }
@@ -798,6 +934,7 @@ bcm_uart_close(void* cookie)
 		wait_for_thread(info->readerThread, &result);
 		info->readerThread = -1;
 	}
+	stop_interrupt(info);
 	sHCI->UnregisterDriver(info->hciID);
 	info->isOpen = false;
 	power_off(info);
@@ -929,6 +1066,7 @@ bcm_uart_init_driver(device_node* node, void** _cookie)
 	info->node = node;
 	info->registersArea = -1;
 	info->readerThread = -1;
+	info->rxSemaphore = -1;
 
 	device_node* parent = sDeviceManager->get_parent_node(node);
 	sDeviceManager->get_driver(parent, (driver_module_info**)&info->pci,
@@ -959,7 +1097,10 @@ bcm_uart_init_driver(device_node* node, void** _cookie)
 	info->pci->set_powerstate(info->device, PCI_pm_state_d0);
 	uint16 command = info->pci->read_pci_config(info->device, PCI_command, 2);
 	info->pci->write_pci_config(info->device, PCI_command, 2,
-		command | PCI_command_memory);
+		(command | PCI_command_memory) & ~PCI_command_int_disable);
+
+	uint8 irq = info->pciInfo.u.h0.interrupt_line;
+	info->irq = (irq == 0 || irq == 0xff) ? 0 : irq;
 
 	info->registersArea = map_physical_memory("bcm_uart registers", base,
 		size, B_ANY_KERNEL_ADDRESS, B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA,
@@ -984,8 +1125,8 @@ bcm_uart_init_driver(device_node* node, void** _cookie)
 	sDevice = info;
 
 	TRACE("Bluetooth on serial port %04x at 0x%" B_PRIxPHYSADDR ", %" B_PRIu32
-		" baud%s\n", info->pciInfo.device_id, base,
-		info->appleBaud != 0 ? info->appleBaud : kDefaultBaud,
+		" baud, interrupt %" B_PRId32 "%s\n", info->pciInfo.device_id, base,
+		info->appleBaud != 0 ? info->appleBaud : kDefaultBaud, info->irq,
 		sTracePackets ? ", tracing packets" : "");
 	*_cookie = info;
 	return B_OK;
